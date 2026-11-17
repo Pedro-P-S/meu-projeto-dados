@@ -1,12 +1,11 @@
-# Perguntas abertas — rodada 2
+# Perguntas abertas — rodada 3
 
-Rodada 1 respondida e incorporada ao Doc Mestre (arquivo único, foto diária, tolerância 0, faixas de atraso até mais de 3 anos, multa e mora no Empréstimo, publicação no repo).
+As rodadas 1 e 2 já estão no Doc Mestre: lançamentos do dia como 3ª fonte, prioridade do saldo líquido, pendências com idade, congelada pelo código de situação, POS com correção igual aos juros.
 
 Responda `sim` para aceitar as recomendações, ou `1 sim, 2 não, 3 <outra>`. Nenhuma resposta precisa de valor real.
 
-1. **Marca de congelada.** A base tem uma coluna que diz se a operação está congelada? Em qual tabela: parcelas ou posição? Recomendo: mapear em `congelada` na tabela onde estiver; o código aceita nas duas.
-2. **Juros congelados da pós.** Para a pós congelada, a base tem uma coluna com os juros acumulados desde o congelamento (o que foi a crédito de RAOC)? Se não tiver, existe um "saldo sem congelamento" para eu calcular a diferença? Sem recomendação: preciso saber.
-3. **Critério de congelamento.** Congela por dias de atraso (quantos?) ou por estágio de risco? Recomendo: com o critério, eu adiciono um alerta para operação que deveria estar congelada e não está (e vice-versa).
-4. **Multa e mora no saldo.** O saldo devedor da posição já inclui multa e mora? Recomendo: deixar `saldo_inclui_multa_mora = sim` e conferir na operação de exemplo. Se a C2 da conta der diferença igual à multa + mora, troca para `nao`.
-5. **Atualização do indexador da pós.** A correção de CDI/Selic vai para as mesmas contas que os juros contratuais (D Empréstimo / C Rendas)? Recomendo: sim, mesma regra.
-6. **Operação de exemplo.** Escolha uma pós congelada, uma pós normal e uma pré em atraso. Recomendo: olhar as três na aba `OPERACOES` e conferir com o razão contábil delas. Você me diz só "bateu" ou "não bateu" em C1/C2 de cada uma.
+1. **Operação no arquivo de lançamentos.** Cada linha do arquivo de lançamentos traz o número da operação? Recomendo: sim, e é isso que aponta a operação. Se não trouxer, o programa só consegue apontar a conta.
+2. **Data no arquivo de lançamentos.** É um CSV por dia (data no nome do arquivo) ou um arquivo com uma coluna de data? Recomendo: um por dia, com `{aaaammdd}` no caminho.
+3. **Dia anterior.** O "dia anterior" é sempre o dia útil anterior, ou a base tem foto também em fim de semana e feriado? Recomendo: dia útil anterior, e `--anterior` em feriado.
+4. **Baseline.** Recomendo: tirar a baseline no primeiro dia que rodar com dados reais. Tudo que já existe vira "Histórico", e a partir do dia seguinte só aparece o que abrir de novo.
+5. **Quem arruma.** A aba `PENDENCIAS` vai para quem corrige. Precisa de mais alguma coisa, por exemplo o histórico do lançamento? Recomendo: não, por enquanto; o detalhe está nas abas `DET_*`.

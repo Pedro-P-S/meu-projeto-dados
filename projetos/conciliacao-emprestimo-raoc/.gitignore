@@ -12,3 +12,7 @@ baseline/
 resumo_verificacao.txt
 __pycache__/
 .venv/
+historico/
+descoberta.*
+hipoteses.*
+diagnostico.txt

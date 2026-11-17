@@ -1,171 +1,223 @@
 # Doc Mestre — Conciliação Empréstimo × RAOC × Saldo
 
 > Segue a estrutura de 8 seções do `00-rules.md` do `meu-projeto-dados`.
-> Documento **público**: nada de nomes reais de tabelas, colunas, schemas, servidores, contas ou valores. Os nomes reais ficam só em `config_local/config.xlsx` no PC do trabalho.
+> Documento **público**: nada de nomes reais de sistemas, tabelas, colunas, contas ou valores. Os nomes reais ficam só em `config_local/config.xlsx` no PC do trabalho (os nomes de exibição das fontes também: parâmetros `nome_base`, `nome_lancamentos`, `nome_contabil`).
 
 ## 1. Visão Geral e Status Atual
 
-- **Versão:** 0.1.0 — `conciliacao.py` (arquivo único) escrito e testado com dados inventados: autoteste 23/23 OK em pandas 1.5, 2.0 e 3.1.
-- **Objetivo:** conciliar, por conta contábil e numa data-base, Empréstimo, RAOC e saldo líquido separadamente, em vez de só o líquido.
-- **Por que:** a conciliação atual só olha Empréstimo − RAOC. Erros iguais nos dois lados se anulam e ficam invisíveis.
+- **Versão:** 0.2.0 — `conciliacao.py` (arquivo único). Autoteste 29/29 OK em pandas 1.5, 2.0 e 3.1.
+- **Objetivo:** bater **3 fontes** (saldo das contas, base operacional, lançamentos do dia) em **3 medidas** (Empréstimo, RAOC, saldo líquido = Empréstimo − RAOC) e dizer **qual operação abriu diferença, em qual medida, há quantos dias**.
+- **Prioridades do negócio:**
+  1. **Estancar o sangramento:** achar a operação que abriu diferença hoje, antes de arrumar diferenças antigas.
+  2. **Saldo líquido primeiro**, depois Empréstimo e RAOC separados.
+  3. Pouca informação para quem vai arrumar: a aba `PENDENCIAS` tem 9 colunas.
 - **Próximos passos:**
-  1. No trabalho: copiar `conciliacao.py`, rodar `autoteste` e `modelo`.
-  2. Com o GPT Sol: preencher `config_local/config.xlsx` com os nomes reais e rodar `diagnostico` até tudo OK.
-  3. Rodar `conciliar` e conferir que a C3 bate com a conciliação atual.
-  4. Gravar a baseline do último fechamento diário.
-  5. Validar as regras de pós-fixada e congelada com uma operação de exemplo.
+  1. No trabalho: `autoteste`, `modelo` e o fluxo de exemplo.
+  2. Preencher a aba `FONTES` com os nomes reais e rodar `descobrir` (sugere as colunas sozinho).
+  3. Rodar `hipoteses` para escolher pelos valores as colunas duvidosas (saldo, juros congelados, código de congelada).
+  4. Conciliar um dia, gravar a baseline e, a partir do dia seguinte, rodar todo dia.
 
 ## 2. Fontes de Dados e Infraestrutura
 
-Nomes genéricos. O nome real de cada fonte fica na aba `FONTES` do config.
+| Apelido | O que é | Grão |
+|---|---|---|
+| `saldo_contabil` | Saldo de cada conta contábil | 1 linha por conta por dia |
+| `parcelas` | Parcelas em aberto da base operacional (foto diária) | 1 linha por parcela por dia |
+| `posicao` | Posição da operação na base operacional (foto diária) | 1 linha por operação por dia |
+| `lancamentos` | Lançamentos do dia que a base operacional mandou para a contabilidade (CSV) | 1 linha por lançamento |
+| `conciliacao_atual` | Diferença da conciliação que já existe (validação) | 1 linha por conta |
 
-| Apelido | O que é | Grão | Origem |
-|---|---|---|---|
-| `saldo_contabil` | Saldo por conta contábil | 1 linha por conta por dia | Oracle |
-| `parcelas` | Parcelas em aberto da base operacional | 1 linha por parcela por dia (tem foto diária) | Oracle |
-| `posicao` | Posição diária por operação | 1 linha por operação por dia | Oracle |
-| `conciliacao_atual` | Diferença da conciliação que já existe | 1 linha por conta | Excel/Access atual (validação) |
-
-- **Leitura:** tipos `excel`, `csv` (separador `;`) e `odbc` (Access ou Oracle, com SQL na aba `FONTES`; aceita `{data_base}` = AAAA-MM-DD e `{data_base_br}` = DD/MM/AAAA).
-- **Objetivo de médio prazo:** tirar o Access do meio. Primeiro lê pelo Access que existe; depois a lógica dele migra para SQL direto no Oracle via `odbc`.
-- **Ambiente:** Windows, Python, `pandas` (1.5+), `openpyxl`, `pyodbc` (só se usar `odbc`). Credenciais nunca no código nem no repo.
+- **Tipos de leitura:** `excel`, `csv` (separador `;`) e `odbc` (Access ou Oracle, SQL na aba `FONTES`).
+- **Marcadores de data** em caminho e SQL: `{data_base}` (AAAA-MM-DD), `{data_base_br}` (DD/MM/AAAA), `{aaaammdd}`, `{ddmmaaaa}`. Exemplo: um CSV de lançamentos por dia.
+- **Médio prazo:** tirar o Access do meio, com SQL direto no Oracle via `odbc`.
+- **Ambiente:** Windows, Python, `pandas` (1.5+), `openpyxl`, `pyodbc` (só para `odbc`).
 
 ### Extensibilidade
 
-- **Conta nova:** uma linha na aba `CONTAS`.
-- **Base de outro sistema:** uma linha em `FONTES` + mapeamento em `COLUNAS`, com outro valor em `sistema`. A chave de operação é (sistema, operação).
+- **Conta nova:** uma linha em `CONTAS`.
+- **Base de outro sistema:** linhas em `FONTES` e `COLUNAS` com outro `sistema`. A chave de operação é (sistema, operação).
 - **Indexador novo:** uma linha em `INDEXADORES`.
-- **Faixa de atraso nova:** linha em `FAIXAS_ATRASO`.
+- **Faixa de atraso nova:** uma linha em `FAIXAS_ATRASO`.
+- **Coluna que é soma de outras:** em `coluna_origem`, escreva `COL_A + COL_B - COL_C` (com espaço em volta do sinal).
 
 ## 3. Dicionário de Dados e Esquema
 
-### 3.1 Modelo canônico
+### 3.1 Modelo canônico (obrigatórias em negrito)
 
-**`saldo_contabil`**: `data_base` (data, opc), `conta` (texto, sem pontuação), `saldo` (num, sinal de origem; vira positivo pelo sinal da aba `CONTAS`).
+- **`saldo_contabil`**: **conta**, **saldo**, data_base.
+- **`parcelas`**: **operacao**, **num_parcela**, **conta_operacional**, **vencimento**, **valor_vencimento**, data_base, multa, mora, raoc_informado, saldo_parcela, indexador, congelada, juros_congelados.
+- **`posicao`**: **operacao**, **conta_operacional**, **saldo_devedor**, data_base, indexador, congelada, juros_congelados, multa, mora.
+- **`lancamentos`**: **conta**, **valor**, data_base, natureza (D/C; vazia = valor já com sinal, devedor positivo), operacao, historico.
+- **`conciliacao_atual`**: **conta**, **diferenca**, data_base.
 
-**`parcelas`**: `operacao`, `num_parcela`, `conta_operacional`, `vencimento`, `valor_vencimento` (obrigatórias); `data_base`, `multa`, `mora`, `raoc_informado`, `saldo_parcela`, `indexador`, `congelada` (opcionais; número vazio = 0).
-
-**`posicao`**: `operacao`, `conta_operacional`, `saldo_devedor` (obrigatórias); `data_base`, `indexador`, `congelada`, `juros_congelados` (opcionais).
-
-**`conciliacao_atual`**: `conta`, `diferenca` (obrigatórias); `data_base` (opc).
-
-Conversões: texto com vírgula decimal vira número; datas DD/MM/AAAA ou AAAA-MM-DD; `congelada` aceita S/SIM/1/TRUE.
+Conversões:
+- **Números:** aceita vírgula decimal; número vazio vira 0 nas colunas opcionais.
+- **Datas:** DD/MM/AAAA ou AAAA-MM-DD.
+- **Conta:** perde a pontuação.
+- **Operação:** perde os zeros à esquerda.
+- **Congelada:** a operação conta como congelada quando o valor da coluna `congelada` está em `valores_congelada`.
 
 ### 3.2 Config (`config_local/config.xlsx`)
 
 | Aba | Colunas |
 |---|---|
-| `PARAMETROS` | `nome`, `valor` — `data_base`, `tolerancia_conta` (0), `tolerancia_operacao` (0), `fonte_saldo_devedor` (`posicao`), `saldo_inclui_multa_mora` (`sim`), `indexador_padrao` (`PRE`), `sinal_conciliacao_atual` (1), `pasta_saidas`, `arquivo_baseline` |
+| `PARAMETROS` | `nome`, `valor` (ver lista abaixo) |
 | `FONTES` | `apelido`, `sistema`, `tipo`, `caminho_ou_conexao`, `aba_ou_consulta` |
-| `COLUNAS` | `apelido`, `sistema`, `coluna_canonica`, `coluna_origem` |
+| `COLUNAS` | `apelido`, `sistema`, `coluna_canonica`, `coluna_origem` (+ `sugerido`, `alternativas` escritas pelo `descobrir`) |
 | `CONTAS` | `conta_operacional`, `conta_emprestimo`, `conta_raoc`, `grupo`, `sinal_emprestimo`, `sinal_raoc`, `ativa` |
 | `INDEXADORES` | `valor_origem`, `tipo` (PRE/POS) |
 | `FAIXAS_ATRASO` | `faixa`, `de_dias`, `ate_dias` |
 
+Parâmetros:
+
+| Parâmetro | Padrão |
+|---|---|
+| `data_base` | |
+| `data_base_anterior` | vazio = dia útil anterior |
+| `tolerancia_conta`, `tolerancia_operacao` | 0 |
+| `fonte_saldo_devedor` | `posicao` |
+| `saldo_inclui_multa_mora` | `sim` |
+| `indexador_padrao` | `PRE` |
+| `valores_congelada` | `S,SIM,1,TRUE,CONGELADA` |
+| `sinal_conciliacao_atual` | 1 |
+| `nome_base`, `nome_lancamentos`, `nome_contabil` | |
+| `pasta_saidas` | `saidas` |
+| `pasta_historico` | `historico` |
+
 ### 3.3 Contratos de funções (`conciliacao.py`)
 
-- `ler_config(caminho) -> (dict[str, DataFrame], dict)` | Entrada: config.xlsx | Saída: abas + parâmetros
-- `carregar_fontes(cfg, P, data_base, raiz, v) -> dict[str, DataFrame]` | Saída: modelo canônico por apelido
-- `calcular_operacoes(dados, contas, indexadores, faixas, P, data_base, v) -> DataFrame` | Saída: 1 linha por (sistema, operação)
-- `conciliar_contas(ops, contabil, contas, v) -> (DataFrame, list)` | Saída: 1 linha por (checagem, conta/grupo)
-- `aplicar_baseline(res, baseline, tol) -> DataFrame` | Saída: RESUMO com status
-- `executar_conciliacao(config, data_base, v) -> (Path, DataFrame, DataFrame, Verificacao)`
+- `carregar_fontes(cfg, P, data_base, raiz, v, cache, apelidos) -> dict[str, DataFrame]`: modelo canônico por apelido.
+- `calcular_operacoes(dados, contas, indexadores, faixas, P, data_base, v) -> DataFrame`: 1 linha por (sistema, operação).
+- `conciliar_contas(ops, contabil, contas, v) -> (DataFrame, list)`: C1, C2, C2b, C3 por conta/grupo.
+- `conciliar_movimento(res_d, res_a, ops_d, ops_a, lanc, contas, P, v) -> (mov_contas, mov_ops, itens)`: movimento do dia.
+- `montar_pendencias(db, res, contas, pasta_hist, P, varios_sistemas, v, itens) -> (pend, residuos, data_baseline)`.
+- `sugerir_mapa(amostra, apelido) -> (escolhido, alternativas, tipos)`: descoberta por nome e tipo.
+- `hipoteses(config, data_base) -> (melhores, tabela)`: escolha pelos valores.
 
 ## 4. Modelagem e Relacionamentos
 
-- `parcelas` N:1 `posicao` por (sistema, operação), junção externa: sobra de qualquer lado vira alerta.
-- `conta_operacional` N:1 `CONTAS`. `conta_emprestimo` e `conta_raoc` N:1 `saldo_contabil.conta`.
-- Uma conta RAOC pode servir várias contas Empréstimo (N:1), dentro do mesmo grupo.
-- **Fluxo:** fontes → adaptador (renomeia, converte, filtra data-base) → modelo canônico → cálculo por operação → soma por conta/grupo → contábil → status contra baseline → Excel + `resumo_verificacao.txt`.
+- `parcelas` N:1 `posicao` por (sistema, operação); junção externa, e a sobra vira alerta.
+- `conta_operacional` N:1 `CONTAS`. Uma conta RAOC pode servir várias contas Empréstimo, no mesmo grupo.
+- `lancamentos.conta` é a conta contábil. Só contam lançamentos em contas Empréstimo ou RAOC da aba `CONTAS`.
+- **Fluxo diário:**
+  1. Fontes do dia D e do dia anterior → modelo canônico.
+  2. Estoque por conta (contábil − base) nos dois dias.
+  3. Movimento: Δ contábil, Δ base e lançamentos, por conta e por (operação, conta).
+  4. Itens divergentes do dia vão para o histórico.
+  5. Pendências abertas (itens acumulados ≠ 0) + baseline + resíduo → Excel.
 
 ## 5. Métricas, Cálculos e Regras de Negócio
 
 ### 5.1 Por operação
 
-`saldo_op` = `saldo_devedor` da posição (+ multa + mora se `saldo_inclui_multa_mora = nao`).
+`saldo_op` = `saldo_devedor` (+ multa + mora se `saldo_inclui_multa_mora = nao`). Multa e mora podem vir das parcelas ou da posição (soma das duas; mapeie em uma só).
 
 | Regra | `emprestimo_op` | `raoc_implicito` |
 |---|---|---|
-| PRE | Σ `valor_vencimento` + Σ `multa` + Σ `mora` | `emprestimo_op − saldo_op` |
-| PRE congelada | igual à PRE | igual à PRE (o saldo da base para de crescer, o RAOC implícito cresce junto) |
-| POS | `saldo_op` | 0 (juros vão a D Empréstimo / C Rendas) |
-| POS congelada | `saldo_op + juros_congelados` | `juros_congelados` (juros vão a D Empréstimo / C RAOC) — **provisória** |
+| PRE | Σ valor_vencimento + multa + mora | emprestimo_op − saldo_op |
+| PRE congelada | igual | igual (o saldo da base para e o RAOC cresce junto) |
+| POS | saldo_op | 0 (juros e correção: D Empréstimo / C Rendas) |
+| POS congelada | saldo_op + juros_congelados | juros_congelados (D Empréstimo / C RAOC) — **provisória** |
 
-- `raoc_coluna` = Σ `raoc_informado`; `erro_coluna_raoc` = `raoc_coluna − raoc_implicito`.
-- `dif_saldo_cruzado` = Σ `saldo_parcela` − `saldo_devedor` (checagem cruzada).
-- `dias_atraso` = data-base − vencimento mais antigo em aberto já vencido (0 se nenhum). Parcelas vencidas ficam na mesma conta.
-- Faixas padrão: Em dia, 1-60, 61-90, 91-180, 181-360, 361-3 anos, Mais de 3 anos.
+### 5.2 Estoque por conta (dia D)
 
-### 5.2 Por conta
-
-| Checagem | Fórmula | Nível |
+| | Fórmula | Nível |
 |---|---|---|
-| C1 | `contábil(Empréstimo) − Σ emprestimo_op` | conta Empréstimo |
-| C2 | `contábil(RAOC) − Σ raoc_implicito` | conta RAOC |
-| C2b | `contábil(RAOC) − Σ raoc_coluna` | conta RAOC |
-| C3 | `[Σ contábil(Emp) − Σ contábil(RAOC)] − Σ saldo_op` | grupo |
+| C1 | contábil(Empréstimo) − Σ emprestimo_op | conta Empréstimo |
+| C2 | contábil(RAOC) − Σ raoc_implicito | conta RAOC |
+| C2b | contábil(RAOC) − Σ raoc_coluna | conta RAOC |
+| C3 | Σ contábil(Emp) − Σ contábil(RAOC) − Σ saldo_op | grupo |
 
-- Identidade checada: C3 = ΣC1 − ΣC2 no grupo (consistência interna).
-- Prova independente: C3 = `conciliacao_atual` por grupo.
-- Contas contábeis fora da aba `CONTAS` são ignoradas.
+### 5.3 Movimento do dia (D − dia anterior)
 
-### 5.3 Status
+Lançamentos com sinal natural da conta: Empréstimo `D − C`; RAOC `C − D`.
 
-`tol` = `tolerancia_conta` (0 por enquanto; diferenças arredondadas em centavos).
+- **Contábil ≠ Lançamentos (por conta):** `Δ contábil − lançamentos`. Mostra lançamento fora do arquivo do dia, por exemplo um manual.
+- **Base ≠ Lançamentos (por operação e conta):** `Δ base − lançamentos`. Mostra a operação que mexeu na base sem o lançamento igual: faltou, sobrou ou foi para outra conta.
+- **Base ≠ Lançamentos (sem operação):** a parte da conta que nenhuma operação explica, por exemplo um lançamento sem número de operação.
+- **Identidade:** Δ(contábil − base) = (Δ contábil − lanç.) − (Δ base − lanç.). Assim, toda mudança na diferença de uma conta vira um item com dono.
 
-| Status | Regra |
+### 5.4 Pendências e idade
+
+- **Impacto** de um item = quanto ele muda a diferença contábil − base da conta (Contábil ≠ Lanç. entra com +, Base ≠ Lanç. entra com −).
+- O histórico guarda os itens de cada dia. Uma pendência fica **aberta** enquanto o acumulado dela (por tipo, operação e conta) for diferente de 0. **Desde** = dia em que o acumulado deixou de ser 0.
+- **Histórico:** as diferenças C1 e C2 da baseline. **Não explicada:** diferença − baseline − Σ itens; a idade conta os dias seguidos de execução em que ela aparece.
+- Por construção, **Σ pendências de um grupo = diferença contábil − base do grupo**.
+- **Prioridade:**
+
+| Prioridade | Quando |
 |---|---|
-| OK | `abs(dif) ≤ tol` |
-| CONHECIDA | há baseline acima de `tol` e `abs(dif − baseline) ≤ tol` |
-| MUDOU | há baseline acima de `tol` e `abs(dif − baseline) > tol` |
-| NOVA | não há baseline (ou era ≤ `tol`) e `abs(dif) > tol` |
+| 1 | Não é histórico e mexe no saldo líquido |
+| 2 | Não é histórico e só mexe em Empréstimo/RAOC |
+| 3 | Histórico que mexe no saldo |
+| 4 | Histórico que não mexe no saldo |
 
-Baseline: `python conciliacao.py baseline AAAA-MM-DD` fotografa as diferenças não zeradas daquela data, mantém os motivos já escritos e guarda cópia da anterior.
+- **Ordem dentro da prioridade:** idade crescente, depois maior valor.
+- **Rodar o mesmo dia de novo substitui** os itens daquele dia (não duplica).
+- **Histórico contínuo:** se o dia anterior não foi conciliado, a checagem avisa e a diferença do dia que faltou aparece como "não explicada".
+
+### 5.5 Descoberta e hipóteses
+
+- **`descobrir`:** lê uma amostra de cada fonte e pontua cada coluna para cada campo canônico. A pontuação usa palavras do nome e o tipo detectado (data, número, texto). Grava a melhor sugestão na aba `COLUNAS`, só onde estava vazio, com confiança e alternativas. Faz backup do config.
+- **`hipoteses`:** roda o estoque com cada candidato e ordena pela soma de |diferença| de C1, C2 e C3. Candidatos testados:
+  - colunas `SALDO*` da posição, para o saldo devedor;
+  - colunas `*CONG*`, sozinhas e somadas, com e sem as `DESCONG`, para os juros congelados;
+  - cada código distinto da coluna `congelada`, para `valores_congelada`;
+  - `saldo_inclui_multa_mora` sim e não.
+
+  O `hipoteses.txt` só tem nomes e posições no ranking.
 
 ## 6. Saídas
 
-`saidas/conciliacao_<data>.xlsx`:
+`saidas/conciliacao_<data>.xlsx`, abas nesta ordem:
 
 | Aba | Conteúdo |
 |---|---|
-| `RESUMO` | 1 linha por (checagem, conta/grupo), ordenada por status e tamanho da diferença, com cor por status |
-| `OPERACOES` | 1 linha por operação com todos os cálculos da 5.1 e alertas |
-| `ATRASO` | Σ por grupo, conta, faixa de atraso e congelada |
-| `INCONSISTENCIAS` | operação só em parcelas/só na posição, conta divergente, sem mapa, indexador desconhecido, RAOC negativo, saldo cruzado, conta sem saldo contábil |
-| `VALIDACAO_ATUAL` | C3 × conciliação atual por grupo |
-| `PARAMETROS` | versão, data-base, parâmetros, linhas lidas, legenda das checagens |
+| `PENDENCIAS` | **Prioridade, Onde, Operação, Conta, Dif. saldo, Dif. Empréstimo, Dif. RAOC, Desde, Idade (dias)**, com cor por prioridade |
+| `RESUMO` | 1 linha por grupo: diferenças das 3 medidas, pendências abertas, abertas hoje, não explicada |
+| `DET_CONTAS` | C1, C2, C2b, C3 por conta/grupo |
+| `DET_MOVIMENTO_CONTAS` | Δ contábil, Δ base e lançamentos por conta |
+| `DET_MOVIMENTO_OPERACOES` | operação × conta com divergência no dia |
+| `DET_OPERACOES` | cálculo completo por operação |
+| `DET_ATRASO` | Σ por grupo, conta, faixa de atraso e congelada |
+| `DET_INCONSISTENCIAS` | alertas de dados |
+| `DET_VALIDACAO_ATUAL` | C3 × conciliação atual |
+| `LEGENDA_PARAMETROS` | legenda das colunas e dos tipos de "Onde", parâmetros, linhas lidas |
 
-Mais `resumo_verificacao.txt` (só OK/FALHOU) e, no `diagnostico`, `diagnostico.txt` (só nomes e tipos de colunas).
+`historico/`: `baseline.xlsx`, `itens.csv`, `residuos.csv`, `execucoes.csv`. Só ficam no PC do trabalho.
 
 ## 7. Decisões, Rotas Descartadas e Pendências
 
 ### Decisões ativas
-- **ADR-001 — RAOC implícito em vez da coluna:** a coluna de RAOC por parcela da base está errada. O RAOC vem de Empréstimo da base − saldo devedor; a coluna só mede o erro (C2b).
-- **ADR-002 — Modelo canônico + config:** contas, sistemas, indexadores e faixas novos entram pelo config, sem mexer no código.
-- **ADR-003 — Repo público genérico:** nomes reais só em `config_local/`, nunca no git.
-- **ADR-004 — Arquivo único:** `conciliacao.py` é um arquivo só, para copiar do navegador para o PC do trabalho. Testes embutidos (`autoteste`).
-- **ADR-005 — Multa e mora no Empréstimo:** entram na conta Empréstimo e não estão no valor no vencimento, por isso são somadas à parte.
+- **ADR-001 — RAOC implícito:** a coluna de RAOC da base está errada. O RAOC vem de Empréstimo − saldo; a coluna só mede o erro (C2b).
+- **ADR-002 — Modelo canônico + config:** contas, sistemas, indexadores e faixas novos entram pelo config.
+- **ADR-003 — Repo público genérico:** nomes reais e nomes de exibição só em `config_local/`.
+- **ADR-004 — Arquivo único** com autoteste, para copiar pelo navegador.
+- **ADR-005 — Multa e mora no Empréstimo**, somadas à parte do valor no vencimento.
+- **ADR-006 — Lançamentos do dia como fonte de identificação:** a diferença nova é atribuída à operação comparando o Δ base com os lançamentos por (operação, conta). O contábil é comparado com os lançamentos por conta.
+- **ADR-007 — Pendência com impacto aditivo:** toda pendência é medida no mesmo sinal (contábil − base). Por isso a lista soma a diferença do grupo e o resíduo mostra o que falta explicar.
 
 ### Rotas descartadas
 - **Conciliar só o líquido:** esconde erros que se anulam.
-- **Um Excel por conta:** ~100 arquivos; trocado por um Excel com filtro.
-- **GPT Sol escrever o código:** troca por código testado aqui; o GPT Sol só preenche o config e diagnostica.
+- **Status OK/CONHECIDA/MUDOU/NOVA (v0.1):** trocado por pendências com idade, que apontam a operação.
+- **Um Excel por conta; GPT Sol escrevendo o código.**
+- **Alerta de "deveria estar congelada":** o critério vem de outro sistema (90+ dias e outros casos); não compensa.
 
 ### Pendências
-- Confirmar com colega e com uma operação de exemplo: regra da POS congelada e de onde vêm `congelada` e `juros_congelados`.
-- Confirmar se o saldo devedor da posição já inclui multa e mora (`saldo_inclui_multa_mora`).
+- Validar com uma operação de exemplo a regra da POS congelada e quais colunas `*CONG*` entram (o `hipoteses` sugere).
 - Montar a aba `CONTAS` a partir do Excel/Access da conciliação atual.
 - Migrar a lógica do Access para SQL no Oracle.
 
 ## 8. Glossário
 
-- **Base operacional**: o sistema de crédito que alimenta o banco de dados com operações e parcelas. _Evitar_: o nome interno do sistema (no repo público).
-- **Conta Empréstimo**: conta que guarda as parcelas no vencimento + multa + mora (PRE) ou o saldo atualizado (POS).
-- **RAOC**: Rendas a Apropriar de Operações de Crédito, conta retificadora com os juros ainda não reconhecidos.
-- **Saldo líquido**: Empréstimo − RAOC.
+- **Base operacional**: o sistema de crédito que gera parcelas, posição e lançamentos. _Evitar_: o nome interno do sistema (no repo público).
+- **Lançamentos do dia**: arquivo com todos os lançamentos contábeis que a base mandou no dia. _Evitar_: o nome interno do arquivo.
+- **Conta Empréstimo**: guarda parcelas no vencimento + multa + mora (PRE) ou saldo atualizado (POS).
+- **RAOC**: Rendas a Apropriar de Operações de Crédito, conta retificadora.
+- **Saldo líquido**: Empréstimo − RAOC. É a medida prioritária.
 - **RAOC implícito**: Empréstimo da base − saldo devedor, por operação.
-- **RAOC coluna**: soma da coluna de RAOC por parcela da base. Sabidamente errada.
-- **Operação congelada**: operação cujos juros passam a ir a crédito de RAOC em vez de rendas, para o saldo líquido não crescer. A base acompanha.
-- **Data-base**: data de corte; contábil e base da mesma data.
-- **Baseline**: foto das diferenças conhecidas numa data-base. _Evitar_: "histórico".
-- **Grupo**: conjunto de contas Empréstimo e RAOC que fecham juntas no saldo líquido.
+- **Operação congelada**: operação cujos juros vão a crédito de RAOC em vez de rendas.
+- **Pendência**: item que explica parte da diferença contábil − base, com dono (operação ou conta) e idade.
+- **Baseline**: foto das diferenças antigas; aparecem como "Histórico".
+- **Não explicada**: parte da diferença que nenhuma pendência explica.
+- **Grupo**: contas Empréstimo e RAOC que fecham juntas no saldo líquido.
