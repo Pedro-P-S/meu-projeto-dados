@@ -10,6 +10,7 @@ Uso (rodar na pasta onde está este arquivo):
   python conciliacao.py autoteste                 testa tudo com dados inventados
   python conciliacao.py modelo                    cria config_local/config.xlsx + dados de exemplo
   python conciliacao.py descobrir                 lê as fontes e sugere o mapeamento das colunas
+  python conciliacao.py contas [AAAA-MM-DD]       acha a regra que monta a conta contábil (formatos estranhos)
   python conciliacao.py hipoteses [AAAA-MM-DD]    testa com os valores qual coluna/regra fecha melhor
   python conciliacao.py conciliar [AAAA-MM-DD] [--anterior AAAA-MM-DD]
   python conciliacao.py baseline AAAA-MM-DD       guarda as diferenças daquela data como "histórico"
@@ -31,7 +32,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSAO = "0.2.6"
+VERSAO = "0.3.0"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 CONFIG_PADRAO = PASTA_SCRIPT / "config_local" / "config.xlsx"
 EPS = 1e-9
@@ -592,6 +593,75 @@ def _vazio(canon, n):
     return pd.Series([""] * n, dtype=object)
 
 
+# ---------------------------------------------------------------------------
+# Regras para montar texto (conta) a partir de pedaços de colunas
+#   COL            coluna inteira (só letras e dígitos)
+#   COL#14         completa com zeros à esquerda até 14 caracteres
+#   COL[3-6]       caracteres 3 a 6 (1 = primeiro); COL#14[3-6] completa e depois recorta
+#   A & B & C      junta pedaços
+#   R1 || R2       formatos misturados: em cada linha vale a 1ª regra que der uma conta da aba CONTAS
+# ---------------------------------------------------------------------------
+_RE_PARTE = re.compile(r"^(.+?)(?:#(\d+))?(?:\[(\d+)(?:-(\d+))?\])?$")
+
+
+def _eh_regra(origem):
+    return any(s in origem for s in ("&", "||", "#", "["))
+
+
+def _regra_texto(origem):
+    alternativas = []
+    for alt in origem.split("||"):
+        partes = []
+        for p in alt.split("&"):
+            m = _RE_PARTE.match(p.strip())
+            if not m or not m.group(1).strip():
+                raise ErroConfig(f"regra inválida: '{p.strip()}'")
+            col, pad, i, j = m.groups()
+            i = int(i) if i else 0
+            partes.append((col.strip(), int(pad) if pad else 0, i, int(j) if j else i))
+        alternativas.append(partes)
+    return alternativas
+
+
+def _colunas_referenciadas(origem, canon):
+    if TIPO_COLUNA.get(canon, "texto") == "texto" and _eh_regra(origem):
+        return [p[0] for alt in _regra_texto(origem) for p in alt]
+    return [col for _, col in _partes_expr(origem)]
+
+
+def _alnum(serie):
+    return _texto(serie).str.replace(r"[^0-9A-Za-z]", "", regex=True)
+
+
+def _aplicar_alternativa(bruto, nomes, partes):
+    out = None
+    for col, pad, i, j in partes:
+        s = _alnum(bruto[nomes[col.strip().upper()]])
+        if pad:
+            s = s.str.zfill(pad)
+        if i:
+            s = s.str[i - 1:j]
+        out = s if out is None else out + s
+    return out.reset_index(drop=True)
+
+
+def _aplicar_regra_texto(bruto, nomes, origem, validos=None):
+    """-> (série resultado, nº de linhas ambíguas: 2+ regras dão contas válidas diferentes)."""
+    alts = [_aplicar_alternativa(bruto, nomes, p) for p in _regra_texto(origem)]
+    if len(alts) == 1 or not validos:
+        return alts[0], 0
+    escolha, achou = alts[0].copy(), alts[0].isin(validos)
+    for a in alts[1:]:
+        usar = ~achou & a.isin(validos)
+        escolha[usar] = a[usar]
+        achou |= usar
+    for a in alts[1:]:  # linha que não é de conta nossa: fica com o 1º resultado não vazio (será ignorada)
+        usar = ~achou & (escolha == "") & (a != "")
+        escolha[usar] = a[usar]
+    validas = pd.concat([a.where(a.isin(validos)) for a in alts], axis=1)
+    return escolha, int((validas.nunique(axis=1) > 1).sum())
+
+
 def _converter(serie, canon, obrigatoria, rotulo, v):
     tipo = TIPO_COLUNA.get(canon, "texto")
     if tipo == "texto":
@@ -609,12 +679,12 @@ def _converter(serie, canon, obrigatoria, rotulo, v):
     return out
 
 
-def canonizar(bruto, apelido, sistema, mapa, data_base, v):
+def canonizar(bruto, apelido, sistema, mapa, data_base, v, validos=None):
     esp = CANONICO[apelido]
     rotulo = f"{apelido}[{sistema or '-'}]"
     faltam = [c for c in esp["obrig"] if c not in mapa]
     nomes = {str(c).strip().upper(): c for c in bruto.columns}
-    ausentes = [col for origem in mapa.values() for _, col in _partes_expr(origem)
+    ausentes = [col for canon, origem in mapa.items() for col in _colunas_referenciadas(origem, canon)
                 if col.strip().upper() not in nomes]
     v.check(f"{rotulo} colunas obrigatórias mapeadas", not faltam)
     v.check(f"{rotulo} colunas mapeadas existem na fonte", not ausentes)
@@ -626,8 +696,15 @@ def canonizar(bruto, apelido, sistema, mapa, data_base, v):
         if canon not in mapa:
             df[canon] = _vazio(canon, len(bruto)).values
             continue
-        partes = _partes_expr(mapa[canon])
         obrig = canon in esp["obrig"]
+        if TIPO_COLUNA.get(canon, "texto") == "texto" and _eh_regra(mapa[canon]):
+            serie, ambiguas = _aplicar_regra_texto(bruto, nomes, mapa[canon], (validos or {}).get(canon))
+            if "||" in mapa[canon] and (validos or {}).get(canon):
+                v.check(f"{rotulo} regra de {canon} sem ambiguidade (só uma regra acha conta por linha)",
+                        ambiguas == 0)
+            df[canon] = _converter(serie, canon, obrig, rotulo, v).values
+            continue
+        partes = _partes_expr(mapa[canon])
         if len(partes) > 1:
             if TIPO_COLUNA.get(canon) != "num":
                 raise ErroConfig(f"{rotulo}: soma de colunas só vale para números ({canon}).")
@@ -653,7 +730,13 @@ def canonizar(bruto, apelido, sistema, mapa, data_base, v):
     return df.reset_index(drop=True)
 
 
-def carregar_fontes(cfg, P, data_base, raiz, v, cache=None, apelidos=None):
+def validos_de(contas):
+    """Valores conhecidos (aba CONTAS) que as regras com '||' usam para escolher o formato de cada linha."""
+    return {"conta": (set(contas["conta_emprestimo"]) | set(contas["conta_raoc"])) - {""},
+            "conta_operacional": set(contas["conta_operacional"]) - {""}}
+
+
+def carregar_fontes(cfg, P, data_base, raiz, v, cache=None, apelidos=None, validos=None):
     partes = {}
     for apelido, sistema, tipo, caminho, alvo in cfg["FONTES"].itertuples(index=False):
         apelido, sistema = _s(apelido), _s(sistema)
@@ -662,7 +745,7 @@ def carregar_fontes(cfg, P, data_base, raiz, v, cache=None, apelidos=None):
         if apelidos is not None and apelido not in apelidos:
             continue
         bruto = abrir_fonte(apelido, sistema, _s(tipo), _s(caminho), _s(alvo), data_base, raiz, cache=cache)
-        df = canonizar(bruto, apelido, sistema, mapa_colunas(cfg, apelido, sistema), data_base, v)
+        df = canonizar(bruto, apelido, sistema, mapa_colunas(cfg, apelido, sistema), data_base, v, validos)
         partes.setdefault(apelido, []).append(df)
     dados = {}
     for apelido, esp in CANONICO.items():
@@ -1216,7 +1299,7 @@ def _preparar(config, v):
 
 
 def _calcular_dia(cfg, P, contas, indexadores, faixas, db, raiz, v, cache, apelidos=None):
-    dados = carregar_fontes(cfg, P, db, raiz, v, cache, apelidos)
+    dados = carregar_fontes(cfg, P, db, raiz, v, cache, apelidos, validos_de(contas))
     ops = calcular_operacoes(dados, contas, indexadores, faixas, P, db, v)
     res, faltam = conciliar_contas(ops, dados["saldo_contabil"], contas, v)
     return dados, ops, res, faltam
@@ -1548,6 +1631,216 @@ def _cfg_com(cfg, apelido, sistema, canon, origem):
                                          "coluna_origem": origem}])], ignore_index=True)
     novo["COLUNAS"] = c.reset_index(drop=True)
     return novo
+
+
+# ---------------------------------------------------------------------------
+# Busca automática da regra que monta a conta contábil (sem ninguém ver os dados)
+# ---------------------------------------------------------------------------
+def _estruturas(L, T, max_blocos=4, min_bloco=2, limite=30000):
+    """Formas de tirar T caracteres de um texto de tamanho L em até max_blocos pedaços contínuos, em ordem."""
+    res = []
+
+    def rec(pos, restante, blocos):
+        if len(res) >= limite:
+            return
+        if restante == 0:
+            res.append(tuple(blocos))
+            return
+        if len(blocos) == max_blocos:
+            return
+        ultimo = len(blocos) == max_blocos - 1
+        for ini in range(pos + (1 if blocos else 0), L - restante + 1):
+            tamanhos = [restante] if ultimo else range(min(min_bloco, restante), restante + 1)
+            for tam in tamanhos:
+                if ini + tam <= L:
+                    rec(ini + tam, restante - tam, blocos + [(ini, ini + tam)])
+
+    rec(0, T, [])
+    return sorted(res, key=len)
+
+
+def _texto_da_regra(colunas, larguras, blocos, completar):
+    partes, offs, o = [], [], 0
+    for c, w in zip(colunas, larguras):
+        offs.append((c, o, o + w, w))
+        o += w
+    for a, b in blocos:
+        for c, ini, fim, w in offs:
+            x, y = max(a, ini), min(b, fim)
+            if x < y:
+                pad = f"#{w}" if completar else ""
+                partes.append(f"{c}{pad}" if (x, y) == (ini, fim) else f"{c}{pad}[{x - ini + 1}-{y - ini}]")
+    return " & ".join(partes)
+
+
+def buscar_regra(bruto, alvo, max_linhas=200000):
+    """Acha a regra (ou regras, se os formatos forem misturados) que transforma colunas da fonte nas contas
+    de 'alvo'. -> (regra, contas achadas, linhas ambíguas, ranking de candidatas)."""
+    alvo = {a for a in alvo if a}
+    if not alvo:
+        return "", set(), 0, []
+    T = pd.Series([len(a) for a in alvo]).mode().max()
+    alvoT = {a for a in alvo if len(a) == T}
+    pre, suf = {a[:2] for a in alvoT}, {a[-2:] for a in alvoT}
+    amostra = bruto.head(max_linhas).reset_index(drop=True)
+    cols = list(amostra.columns)
+    al = {c: _alnum(amostra[c]) for c in cols}
+    maxlen = {c: int(al[c].str.len().max() or 0) for c in cols}
+    bases = [[c] for c in cols if T <= maxlen[c] <= 30]
+    curtas = {c for c in cols if 1 <= maxlen[c] <= T}
+    for i in range(len(cols)):
+        for n in (2, 3):
+            g = cols[i:i + n]
+            if len(g) == n and all(c in curtas for c in g) and T <= sum(maxlen[c] for c in g) <= 30:
+                bases.append(g)
+
+    candidatas = {}
+    for base in bases:
+        variantes = []
+        if len(base) == 1:
+            c = base[0]
+            tam = al[c].str.len()
+            for L in tam[tam >= T].value_counts().index[:4]:  # cada tamanho, sem completar
+                variantes.append((al[c][tam == L], [int(L)], False))
+            if tam[tam > 0].nunique() > 1:  # zeros à esquerda perdidos: completa até o maior
+                variantes.append((al[c].str.zfill(maxlen[c]), [maxlen[c]], True))
+        else:
+            s = None
+            for c in base:
+                p = al[c].str.zfill(maxlen[c])
+                s = p if s is None else s + p
+            variantes.append((s, [maxlen[c] for c in base], True))
+        for serie, larguras, completar in variantes:
+            vc = serie.value_counts()
+            vals = [v for v in vc.index if any(p in v for p in pre) and any(x in v for x in suf)][:1500]
+            if not vals:
+                continue
+            L = len(vals[0])
+            vals = [v for v in vals if len(v) == L]
+            pesos = [int(vc[v]) for v in vals]
+            for blocos in _estruturas(L, T):
+                achadas, linhas = set(), 0
+                for v, p in zip(vals, pesos):
+                    r = "".join(v[a:b] for a, b in blocos)
+                    if r in alvoT:
+                        achadas.add(r)
+                        linhas += p
+                if achadas:
+                    regra = _texto_da_regra(base, larguras, blocos, completar)
+                    if regra not in candidatas or len(achadas) > len(candidatas[regra][0]):
+                        candidatas[regra] = (achadas, linhas, len(blocos))
+            if any(len(a) == len(alvoT) for a, _, _ in candidatas.values()):
+                break
+        if any(len(a) == len(alvoT) for a, _, _ in candidatas.values()):
+            break
+    if not candidatas:
+        return "", set(), 0, []
+    ranking = sorted(candidatas.items(), key=lambda kv: (-len(kv[1][0]), kv[1][2], -kv[1][1]))[:25]
+
+    # formatos misturados: junta regras enquanto cada uma achar contas novas
+    nomes = {str(c).strip().upper(): c for c in cols}
+    escolhidas, cobertas = [], set()
+    for _ in range(4):
+        melhor, ganho = None, set()
+        for regra, _ in ranking:
+            if regra in escolhidas:
+                continue
+            res_ = _aplicar_regra_texto(amostra, nomes, regra)[0]
+            novas = (set(res_[res_.isin(alvoT)]) - cobertas)
+            if len(novas) > len(ganho):
+                melhor, ganho = regra, novas
+        if not melhor:
+            break
+        escolhidas.append(melhor)
+        cobertas |= ganho
+        if cobertas >= alvoT:
+            break
+    regra_final = " || ".join(escolhidas)
+    final, ambiguas = _aplicar_regra_texto(amostra, nomes, regra_final, alvo)
+    return regra_final, set(final[final.isin(alvo)]), ambiguas, \
+        [(r, len(a), l) for r, (a, l, _) in ranking]
+
+
+def buscar_contas(config, data_base=None, eco=True):
+    """Para cada fonte com conta contábil (saldo_contabil, lancamentos): testa a regra atual, procura uma
+    melhor e grava a melhor no config (com backup). Relatório: contas.txt (só local)."""
+    v = Verificacao(eco=eco)
+    raiz, cfg, P, contas, _, _ = _preparar(config, Verificacao(eco=False))
+    config = Path(config).resolve()
+    db = _data_param(data_base if data_base else (P["data_base"] or datetime.now().strftime("%Y-%m-%d")),
+                     "data_base")
+    alvo = validos_de(contas)["conta"]
+    v.check("aba CONTAS tem contas para procurar", bool(alvo))
+    if not alvo:
+        return v, {}
+    abas = pd.read_excel(config, sheet_name=None, dtype=object)
+    txt, resultado, mudou = [f"Contas da aba CONTAS: {len(alvo)}", ""], {}, False
+    for apelido, sistema, tipo, caminho, alvo_sql in cfg["FONTES"].itertuples(index=False):
+        apelido, sistema = _s(apelido), _s(sistema)
+        if apelido not in ("saldo_contabil", "lancamentos"):
+            continue
+        rotulo = f"{apelido}[{sistema or '-'}]"
+        caminho_usado = _s(caminho)
+        if _s(tipo).lower() in ("csv", "excel") and not _resolver(
+                _substituir(_limpar_caminho(caminho_usado), db), raiz).exists():
+            caminho_usado = _arquivo_mais_recente(caminho_usado, raiz) or caminho_usado
+        try:
+            bruto = abrir_fonte(apelido, sistema, _s(tipo), caminho_usado, _s(alvo_sql), db, raiz, amostra=200000)
+        except ErroConfig as e:
+            v.check(f"{rotulo} fonte abre", False)
+            v.info(f"    {e}")
+            continue
+        nomes = {str(c).strip().upper(): c for c in bruto.columns}
+        atual = mapa_colunas(cfg, apelido, sistema).get("conta", "")
+        achadas_atual = set()
+        if atual and all(c.strip().upper() in nomes for c in _colunas_referenciadas(atual, "conta")):
+            serie = (_aplicar_regra_texto(bruto, nomes, atual, alvo)[0] if _eh_regra(atual)
+                     else _alnum(bruto[nomes[atual.strip().upper()]]))
+            achadas_atual = set(serie[serie.isin(alvo)])
+        regra, achadas, ambiguas, ranking = buscar_regra(bruto, alvo)
+        usar_nova = len(achadas) > len(achadas_atual)
+        resultado[rotulo] = {"atual": len(achadas_atual), "sugerida": len(achadas), "regra": regra,
+                             "ambiguas": ambiguas, "total": len(alvo)}
+        txt += [f"[{rotulo}]",
+                f"  regra atual ({atual or 'nenhuma'}): acha {len(achadas_atual)} de {len(alvo)} contas",
+                f"  regra encontrada: acha {len(achadas)} de {len(alvo)} contas"
+                + (f" — linhas ambíguas: {ambiguas}" if ambiguas else ""),
+                f"    {regra or '(nenhuma)'}",
+                "  outras candidatas (contas achadas):"] + \
+               [f"    {n:>4}  {r}" for r, n, _ in ranking[:8]]
+        faltam = sorted(alvo - (achadas if usar_nova else achadas_atual))
+        if faltam:
+            txt.append(f"  contas da aba CONTAS não achadas nesta fonte ({len(faltam)}): {', '.join(faltam[:60])}")
+        txt.append("")
+        if apelido == "saldo_contabil":  # lançamentos de um dia não passam por todas as contas
+            v.check(f"{rotulo} regra da conta acha todas as contas da aba CONTAS",
+                    max(len(achadas), len(achadas_atual)) == len(alvo))
+        if usar_nova:
+            c = abas["COLUNAS"]
+            for col in ("sugerido", "alternativas"):
+                if col not in c.columns:
+                    c[col] = ""
+            alvo_linha = ((c["apelido"].map(_s) == apelido) & (c["sistema"].map(_s) == sistema)
+                          & (c["coluna_canonica"].map(_s) == "conta"))
+            c = c[~alvo_linha]
+            c = pd.concat([c, pd.DataFrame([{"apelido": apelido, "sistema": sistema, "coluna_canonica": "conta",
+                                             "coluna_origem": regra,
+                                             "sugerido": f"contas: acha {len(achadas)} de {len(alvo)}"}])],
+                          ignore_index=True)
+            abas["COLUNAS"] = c
+            mudou = True
+    if mudou:
+        shutil.copy2(config, config.with_name(f"config_anterior_{datetime.now():%Y%m%d_%H%M%S}.xlsx"))
+        with pd.ExcelWriter(config, engine="openpyxl") as w:
+            for nome, df in abas.items():
+                df.to_excel(w, sheet_name=nome, index=False)
+                _formatar(w.sheets[nome], df)
+        txt.append("A regra encontrada foi gravada na aba COLUNAS (coluna_canonica = conta). Backup do config salvo.")
+    (raiz / "contas.txt").write_text("\n".join(txt) + "\n", encoding="utf-8")
+    if eco:
+        print("\n".join(txt))
+        print(f"Relatório (só para você): {raiz / 'contas.txt'}")
+    return v, resultado
 
 
 def hipoteses(config, data_base=None, eco=True):
@@ -2065,6 +2358,45 @@ def autoteste():
                 list(ler_fonte("csv", str(pasta_acento / "Lançamento_{ddmmaaaa}.csv"), "", db, tmp4).columns)
                 == ["CONTA", "VALOR"]
                 and list(ler_fonte("excel", str(pasta_acento / "Saldo ação.xlsx"), "", db, tmp4).columns) == ["CONTA"])
+        # Regra para montar a conta: posições, campos juntados, formatos misturados
+        dfr = pd.DataFrame({"LONGA": ["99111177225533", "", "99999977888888"], "P1": ["", "1111", "9999"],
+                            "P2": ["", "1222", "1288"], "P3": ["", "3334", "8834"]})
+        nomes_r = {k: k for k in dfr.columns}
+        r1, _ = _aplicar_regra_texto(dfr, nomes_r, "LONGA[3-6] & LONGA[9-10] & LONGA[13-14]")
+        r2, amb = _aplicar_regra_texto(dfr, nomes_r, "LONGA[3-6] & LONGA[9-10] & LONGA[13-14] || "
+                                       "P1#4 & P2#4[3-4] & P3#4[1-2]", {"11112233", "11112233x"})
+        v.check("T45 regra por posição e formatos misturados (||)",
+                r1.iloc[0] == "11112233" and list(r2[:2]) == ["11112233", "11112233"] and amb == 0)
+
+        # Busca automática da regra num saldo contábil com dois formatos misturados
+        tmp7, config7 = nova_pasta()
+        cont = pd.read_excel(tmp7 / "dados" / "contabil.xlsx", dtype={"CONTA": str})
+        dig = cont["CONTA"].str.replace(".", "", regex=False)
+        formato_a = dig.str.startswith("1")
+        cont["CTA_LONGA"] = np.where(formato_a, "99" + dig.str[:4] + "77" + dig.str[4:6] + "5" + dig.str[6:], "")
+        cont["CTA_P1"] = np.where(formato_a, "", dig.str[:4])
+        cont["CTA_P2"] = np.where(formato_a, "", "12" + dig.str[4:6])
+        cont["CTA_P3"] = np.where(formato_a, "", dig.str[6:] + "34")
+        cont.drop(columns="CONTA").to_excel(tmp7 / "dados" / "contabil.xlsx", index=False)
+        abas = pd.read_excel(config7, sheet_name=None, dtype=object)
+        c = abas["COLUNAS"]
+        c.loc[(c["apelido"] == "saldo_contabil") & (c["coluna_canonica"] == "conta"), "coluna_origem"] = "CTA_LONGA"
+        abas["COLUNAS"] = c
+        with pd.ExcelWriter(config7, engine="openpyxl") as w:
+            for nome, df in abas.items():
+                df.to_excel(w, sheet_name=nome, index=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            _, achou = buscar_contas(config7, DATA_EXEMPLO, eco=False)
+        info = achou.get("saldo_contabil[-]", {})
+        v.check("T46 busca acha a regra das contas em formatos misturados (todas as contas)",
+                info.get("sugerida") == info.get("total") == 5 and "||" in info.get("regra", ""))
+        rodar(config7, f"{da:%Y-%m-%d}")
+        gravar_baseline(config7, f"{da:%Y-%m-%d}", eco=False)
+        r7 = rodar(config7)
+        v.check("T47 conciliação com a regra gravada dá o mesmo resultado",
+                dif(r7["res"], "C1", "1000002") == 10 and dif(r7["res"], "C3", "G3") == 0
+                and not [l for l in r7["v"].linhas if "FALHOU" in l and "pendência" not in l])
+
         v.check("T40 marcador de data em maiúsculas ({DDMMAAAA})",
                 _substituir("X_{DDMMAAAA}_{aaaammdd}.csv", db) == f"X_{db:%d%m%Y}_{db:%Y%m%d}.csv")
     finally:
@@ -2074,11 +2406,12 @@ def autoteste():
 
 
 # ---------------------------------------------------------------------------
-COMANDOS = ["autoteste", "modelo", "descobrir", "hipoteses", "conciliar", "baseline"]
+COMANDOS = ["autoteste", "modelo", "descobrir", "contas", "hipoteses", "conciliar", "baseline"]
 MENU = [
     ("autoteste", "testa o programa com dados inventados", False),
     ("modelo", "cria config_local/config.xlsx e dados de exemplo", False),
     ("descobrir", "lê as fontes e sugere as colunas", False),
+    ("contas", "acha a regra para montar a conta contábil (formatos estranhos)", True),
     ("hipoteses", "testa pelos valores qual coluna fecha melhor", True),
     ("conciliar", "concilia um dia e gera o Excel", True),
     ("baseline", "guarda as diferenças de um dia como 'Histórico'", True),
@@ -2129,6 +2462,8 @@ def main(argv=None):
             return 0
         elif a.comando == "descobrir":
             v = descobrir(a.config)
+        elif a.comando == "contas":
+            v, _ = buscar_contas(a.config, a.data_base)
         elif a.comando == "hipoteses":
             hipoteses(a.config, a.data_base)
             return 0

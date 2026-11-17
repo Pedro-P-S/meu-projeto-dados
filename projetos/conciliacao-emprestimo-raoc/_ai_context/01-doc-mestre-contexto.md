@@ -5,7 +5,7 @@
 
 ## 1. Visão Geral e Status Atual
 
-- **Versão:** 0.2.6 — `conciliacao.py` (arquivo único). Autoteste 46/46 OK em pandas 1.5, 2.0 e 3.1.
+- **Versão:** 0.3.0 — `conciliacao.py` (arquivo único). Autoteste 49/49 OK em pandas 1.5, 2.0 e 3.1.
 - **Objetivo:** bater **3 fontes** (saldo das contas, base operacional, lançamentos do dia) em **3 medidas** (Empréstimo, RAOC, saldo líquido = Empréstimo − RAOC) e dizer **qual operação abriu diferença, em qual medida, há quantos dias**.
 - **Prioridades do negócio:**
   1. **Estancar o sangramento:** achar a operação que abriu diferença hoje, antes de arrumar diferenças antigas.
@@ -42,6 +42,13 @@
 - **Indexador novo:** uma linha em `INDEXADORES`.
 - **Faixa de atraso nova:** uma linha em `FAIXAS_ATRASO`.
 - **Coluna que é soma de outras:** em `coluna_origem`, escreva `COL_A + COL_B - COL_C` (com espaço em volta do sinal).
+- **Conta montada a partir de pedaços** (campos de texto, como `conta`), em `coluna_origem`:
+  - `COL[3-6]`: caracteres 3 a 6 da coluna.
+  - `COL#14`: completa com zeros à esquerda até 14 caracteres. Pode combinar com o recorte: `COL#14[3-6]`.
+  - `A & B & C`: junta os pedaços, na ordem.
+  - `R1 || R2`: formatos misturados. Em cada linha vale a primeira regra que der uma conta da aba `CONTAS`; se duas regras derem contas diferentes, a checagem avisa.
+  - Antes de recortar, a coluna perde tudo que não é letra ou dígito.
+  - O comando `contas` acha essa regra sozinho.
 
 ## 3. Dicionário de Dados e Esquema
 
@@ -159,7 +166,14 @@ Lançamentos com sinal natural da conta: Empréstimo `D − C`; RAOC `C − D`.
 - **Rodar o mesmo dia de novo substitui** os itens daquele dia (não duplica).
 - **Histórico contínuo:** se o dia anterior não foi conciliado, a checagem avisa e a diferença do dia que faltou aparece como "não explicada".
 
-### 5.5 Descoberta e hipóteses
+### 5.5 Descoberta, regra da conta e hipóteses
+
+- **`contas`:** procura a regra que monta a conta contábil nas fontes `saldo_contabil` e `lancamentos`, usando como alvo as contas da aba `CONTAS`.
+  - Testa cada coluna, sozinha e completada com zeros, e grupos de 2 ou 3 colunas vizinhas.
+  - Em cada uma, tenta todos os recortes em até 4 pedaços contínuos, em ordem.
+  - Para formatos misturados, junta até 4 regras com `||` enquanto cada uma achar contas novas.
+  - Grava a regra no config só se ela achar mais contas que a atual, com backup.
+  - O `contas.txt` diz quantas contas a regra atual e a encontrada acham, quais não foram achadas e as outras candidatas. Fica só local.
 
 - **`descobrir`:** lê uma amostra de cada fonte e pontua cada coluna para cada campo canônico. A pontuação usa palavras do nome e o tipo detectado (data, número, texto). Grava a melhor sugestão na aba `COLUNAS`, só onde estava vazio, com confiança e alternativas. Faz backup do config.
 - **`hipoteses`:** roda o estoque com cada candidato e ordena pela soma de |diferença| de C1, C2 e C3. Candidatos testados:

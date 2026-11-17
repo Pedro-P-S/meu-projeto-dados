@@ -57,7 +57,12 @@ As linhas de um grupo somam a diferença do grupo, que aparece na aba `RESUMO`. 
    python conciliacao.py descobrir
    ```
    Ele preenche a aba `COLUNAS` sozinho e marca a confiança de cada sugestão. Confira as de confiança média ou baixa. Os nomes e tipos de todas as colunas ficam em `descoberta.xlsx`; ela é só para você, não mande para IA.
-7. Preencha a aba `CONTAS`, com a ajuda do GPT Sol a partir da conciliação atual. Depois deixe o programa testar pelos valores as colunas duvidosas:
+7. Preencha a aba `CONTAS` a partir do seu Excel de-para: código da base em `conta_operacional`, contas de Empréstimo e RAOC e o grupo. As contas da aba são a lista do que o programa pega do saldo contábil. Se a conta vem num formato estranho (dentro de um campo longo, espalhada em vários campos ou misturada), rode:
+   ```
+   python conciliacao.py contas
+   ```
+   Ele acha a regra que monta a conta, grava no config e diz quantas contas da aba `CONTAS` encontrou (`contas.txt`).
+   Depois deixe o programa testar pelos valores as colunas duvidosas:
    ```
    python conciliacao.py hipoteses 2026-11-14
    ```
