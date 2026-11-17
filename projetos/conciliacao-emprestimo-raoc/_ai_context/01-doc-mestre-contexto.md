@@ -5,7 +5,7 @@
 
 ## 1. Visão Geral e Status Atual
 
-- **Versão:** 0.2.2 — `conciliacao.py` (arquivo único). Autoteste 32/32 OK em pandas 1.5, 2.0 e 3.1.
+- **Versão:** 0.2.3 — `conciliacao.py` (arquivo único). Autoteste 35/35 OK em pandas 1.5, 2.0 e 3.1.
 - **Objetivo:** bater **3 fontes** (saldo das contas, base operacional, lançamentos do dia) em **3 medidas** (Empréstimo, RAOC, saldo líquido = Empréstimo − RAOC) e dizer **qual operação abriu diferença, em qual medida, há quantos dias**.
 - **Prioridades do negócio:**
   1. **Estancar o sangramento:** achar a operação que abriu diferença hoje, antes de arrumar diferenças antigas.
@@ -31,6 +31,9 @@
 - **Marcadores de data** em caminho e SQL: `{data_base}` (AAAA-MM-DD), `{data_base_br}` (DD/MM/AAAA), `{aaaammdd}`, `{ddmmaaaa}`. Exemplo: um CSV de lançamentos por dia.
 - **Médio prazo:** tirar o Access do meio, com SQL direto no Oracle via `odbc`.
 - **Ambiente:** Windows, Python, `pandas` (1.5+), `openpyxl`, `pyodbc` (só para `odbc`).
+- **Onde estão os dados:** saldo das contas, parcelas e posição estão no mesmo banco de dados (data warehouse), que recebe dados de vários sistemas. Os lançamentos do dia são um CSV gerado pelo sistema de crédito, um arquivo por dia.
+- **Senha:** nunca no config. Na conexão, escreva `PWD={senha}` (ou `{senha:NOME}` para mais de um banco). O programa lê a variável de ambiente `CONCILIACAO_SENHA` (ou `CONCILIACAO_SENHA_NOME`); se ela não existir, pergunta uma vez por execução, sem mostrar o que é digitado.
+- **`sistema` (FONTES/COLUNAS):** é o sistema de origem, dono do número da operação, não o banco de onde a tabela vem. Com um sistema só, deixe vazio em tudo. Com vários: filtre cada sistema no SQL, preencha `sistema` nas linhas de parcelas, posição e lançamentos daquele sistema, e só casam lançamento e operação do mesmo sistema. Lançamento sem `sistema`, com um só sistema na base, é atribuído a ele.
 
 ### Extensibilidade
 
@@ -210,7 +213,8 @@ Lançamentos com sinal natural da conta: Empréstimo `D − C`; RAOC `C − D`.
 
 ## 8. Glossário
 
-- **Base operacional**: o sistema de crédito que gera parcelas, posição e lançamentos. _Evitar_: o nome interno do sistema (no repo público).
+- **Base**: as tabelas de parcelas e posição no banco de dados. No relatório, recebe o nome de `nome_base`. _Evitar_: o nome interno do banco (no repo público).
+- **Sistema de origem**: sistema que manda as operações para o banco de dados. É o dono do número da operação.
 - **Lançamentos do dia**: arquivo com todos os lançamentos contábeis que a base mandou no dia. _Evitar_: o nome interno do arquivo.
 - **Conta Empréstimo**: guarda parcelas no vencimento + multa + mora (PRE) ou saldo atualizado (POS).
 - **RAOC**: Rendas a Apropriar de Operações de Crédito, conta retificadora.

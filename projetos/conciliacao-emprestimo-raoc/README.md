@@ -48,6 +48,8 @@ As linhas de um grupo somam a diferença do grupo, que aparece na aba `RESUMO`. 
    Abra `saidas\conciliacao_2026-11-13.xlsx`.
 5. Ligue nas fontes reais. Apague `config_local\` e `dados\` do exemplo e rode `python conciliacao.py modelo` de novo. No `config_local\config.xlsx`:
    - Aba `FONTES`: uma linha por fonte, com o SQL ou o caminho do arquivo. Para o CSV de lançamentos de cada dia, use `{aaaammdd}` no nome do arquivo.
+   - Conexão com senha: na string de conexão escreva `PWD={senha}`. O programa pergunta a senha ao rodar (não aparece na tela). Para não digitar todo dia, crie a variável de ambiente `CONCILIACAO_SENHA` na sua conta do Windows.
+   - Coluna `sistema`: com um sistema de origem só, deixe vazia em todas as linhas.
    - Aba `PARAMETROS`: coloque em `nome_base`, `nome_lancamentos` e `nome_contabil` os nomes que vocês usam.
    - Aba `COLUNAS`: apague as linhas do exemplo e deixe a aba vazia.
 6. Deixe o programa achar as colunas:

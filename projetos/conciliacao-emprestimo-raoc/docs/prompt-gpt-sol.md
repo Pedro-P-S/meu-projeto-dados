@@ -14,8 +14,9 @@ Regras:
 
 Passos:
 1. **Aba `FONTES`.** Uma linha por fonte, com `apelido` = `saldo_contabil`, `parcelas`, `posicao`, `lancamentos` ou `conciliacao_atual`.
-   - Access/Oracle: `tipo = odbc`. A string de conexão vai em `caminho_ou_conexao`, sem senha (autenticação do Windows ou DSN existente). O SQL vai em `aba_ou_consulta`, filtrando o dia com `{data_base}` (AAAA-MM-DD) ou `{data_base_br}` (DD/MM/AAAA). Use `SELECT *` para o `descobrir` ver todas as colunas.
-   - Arquivo: `tipo = csv` (separador `;`) ou `excel`. Se houver um arquivo por dia, use `{aaaammdd}` ou `{ddmmaaaa}` no nome.
+   - Access/Oracle: `tipo = odbc`. A string de conexão vai em `caminho_ou_conexao`, com `PWD={senha}` no lugar da senha (o programa pergunta ao rodar). Nunca escreva a senha. O SQL vai em `aba_ou_consulta`, filtrando o dia com `{data_base}` (AAAA-MM-DD) ou `{data_base_br}` (DD/MM/AAAA). Use `SELECT *` para o `descobrir` ver todas as colunas.
+   - `sistema` = sistema de origem das operações. Com um só, deixe vazio.
+   - Arquivo: `tipo = csv` (separador detectado sozinho) ou `excel`. Se houver um arquivo por dia, use `{aaaammdd}` ou `{ddmmaaaa}` no nome.
 2. Eu rodo `python conciliacao.py descobrir` e colo o `descoberta.txt` (só nomes de colunas). Revise as sugestões de confiança média ou baixa e as colunas obrigatórias (marcadas com `*`) sem sugestão. Diga qual alternativa usar, ou a fórmula `COL_A + COL_B`.
 3. **Aba `CONTAS`.** Ajude a achar, no Excel/Access da conciliação atual, o de-para conta Empréstimo → conta RAOC (e o grupo). Escreva um script Python que leia esse de-para e grave a aba `CONTAS`, imprimindo só OK/FALHOU.
 4. **Aba `INDEXADORES`.** Classifique cada código de indexador (a lista está na `descoberta.xlsx`, que eu leio para você) em PRE ou POS.

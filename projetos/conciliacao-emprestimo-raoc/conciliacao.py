@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSAO = "0.2.2"
+VERSAO = "0.2.3"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 CONFIG_PADRAO = PASTA_SCRIPT / "config_local" / "config.xlsx"
 EPS = 1e-9
@@ -243,6 +243,27 @@ def _dia_util_anterior(d):
     return d
 
 
+_SENHAS = {}
+
+
+def _preencher_senha(conexao):
+    """Troca {senha} ou {senha:NOME} pela senha, sem nunca gravá-la em arquivo.
+    Ordem: variável de ambiente CONCILIACAO_SENHA (ou CONCILIACAO_SENHA_NOME); senão pergunta
+    uma vez por execução, sem mostrar o que é digitado."""
+    import getpass
+    import os
+
+    def trocar(m):
+        nome = (m.group(1) or "").upper()
+        if nome not in _SENHAS:
+            var = "CONCILIACAO_SENHA" + (f"_{nome}" if nome else "")
+            _SENHAS[nome] = os.environ.get(var) or getpass.getpass(
+                f"Senha do banco{' ' + nome if nome else ''} (não aparece ao digitar): ")
+        return _SENHAS[nome]
+
+    return re.sub(r"\{senha(?::([A-Za-z0-9_]+))?\}", trocar, conexao)
+
+
 def _substituir(texto, db):
     return (texto.replace("{data_base}", db.strftime("%Y-%m-%d"))
                  .replace("{data_base_br}", db.strftime("%d/%m/%Y"))
@@ -360,7 +381,7 @@ def ler_fonte(tipo, caminho, alvo, data_base, raiz, amostra=None, cache=None):
                 continue
     elif tipo == "odbc":
         import pyodbc  # só precisa existir se alguma fonte for odbc
-        con = pyodbc.connect(caminho)
+        con = pyodbc.connect(_preencher_senha(caminho))
         try:
             cur = con.cursor()
             cur.execute(alvo)
@@ -687,6 +708,12 @@ def conciliar_movimento(res_d, res_a, ops_d, ops_a, lanc, contas, P, v):
     tol_op = _num_param(P, "tolerancia_operacao")
     emp_set, raoc_set = set(contas["conta_emprestimo"]), set(contas["conta_raoc"])
     lc = lanc.copy()
+    # 'sistema' = dono do número da operação. Lançamento sem sistema, com um só sistema na base: é dele.
+    sistemas_base = set(ops_d["sistema"]) | set(ops_a["sistema"])
+    if len(sistemas_base) == 1:
+        lc.loc[lc["sistema"] == "", "sistema"] = next(iter(sistemas_base))
+    v.check("lançamentos: sistema informado (há mais de um sistema na base)",
+            len(sistemas_base) <= 1 or not (lc["sistema"] == "").any())
     nat = lc["natureza"].astype(str).str[:1]
     v.check("lançamentos: natureza é D ou C", nat.isin(["D", "C", ""]).all())
     lc["mov"] = lc["valor"] * np.where(nat == "C", -1.0, 1.0)          # devedor positivo
@@ -1719,6 +1746,51 @@ def autoteste():
                 melhores.get("parametro.saldo_inclui_multa_mora") == ["sim"])
         v.check("T29 hipóteses: código de situação que significa congelada",
                 melhores.get("parametro.valores_congelada") == ["S"])
+        # Senha: variável de ambiente ou pergunta uma vez, nunca no config
+        import os
+        import getpass as _gp
+        guardada = os.environ.pop("CONCILIACAO_SENHA", None)
+        try:
+            _SENHAS.clear()
+            os.environ["CONCILIACAO_SENHA_TESTE"] = "x1"
+            ok_env = _preencher_senha("UID=u;PWD={senha:teste}") == "UID=u;PWD=x1"
+            del os.environ["CONCILIACAO_SENHA_TESTE"]
+            _SENHAS.clear()
+            chamadas, original = [], _gp.getpass
+            _gp.getpass = lambda prompt="": chamadas.append(prompt) or "y2"
+            try:
+                a = _preencher_senha("PWD={senha}")
+                b = _preencher_senha("PWD={senha};X={senha}")
+            finally:
+                _gp.getpass = original
+        finally:
+            _SENHAS.clear()
+            if guardada is not None:
+                os.environ["CONCILIACAO_SENHA"] = guardada
+        v.check("T31 senha lida da variável de ambiente", ok_env)
+        v.check("T32 senha perguntada uma vez só por execução",
+                a == "PWD=y2" and b == "PWD=y2;X=y2" and len(chamadas) == 1)
+
+        # Um sistema só, lançamentos sem 'sistema': casam com a base sozinhos
+        tmp5, config5 = nova_pasta()
+        abas = pd.read_excel(config5, sheet_name=None, dtype=object)
+        f = abas["FONTES"]
+        f = f[~((f["sistema"] == "B") & f["apelido"].isin(["parcelas", "posicao", "lancamentos"]))].copy()
+        f.loc[f["apelido"] == "lancamentos", "sistema"] = np.nan
+        abas["FONTES"] = f
+        c = abas["COLUNAS"]
+        c.loc[(c["apelido"] == "lancamentos") & (c["sistema"] == "A"), "sistema"] = np.nan
+        abas["COLUNAS"] = c
+        with pd.ExcelWriter(config5, engine="openpyxl") as w:
+            for nome, df in abas.items():
+                df.to_excel(w, sheet_name=nome, index=False)
+        rodar(config5, f"{da:%Y-%m-%d}")
+        r6 = rodar(config5)
+        it = r6["itens"]
+        v.check("T33 lançamentos sem 'sistema' casam com a base de um sistema só",
+                not ((it["onde"] == "BASE_X_LANC") & it["operacao"].isin(["A1", "A2"])).any()
+                and "CHECK lançamentos: sistema informado (há mais de um sistema na base): OK" in r6["v"].linhas)
+
         # CSV com outro separador é detectado sozinho
         tmp4 = nova_pasta()[0]
         for sep in (",", chr(9), "|"):
