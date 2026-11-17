@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSAO = "0.2.5"
+VERSAO = "0.2.6"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 CONFIG_PADRAO = PASTA_SCRIPT / "config_local" / "config.xlsx"
 EPS = 1e-9
@@ -246,6 +246,27 @@ def _dia_util_anterior(d):
 _SENHAS = {}
 
 
+def _pedir_senha(rotulo):
+    """Terminal (cmd/Prompt): getpass, que esconde o texto. Spyder/IPython: janela com ****, que não
+    mostra a senha nem a deixa no histórico do console."""
+    import getpass
+    if sys.stdin is not None and hasattr(sys.stdin, "isatty") and sys.stdin.isatty():
+        return getpass.getpass(f"{rotulo} ")
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog
+        raiz = tk.Tk()
+        raiz.withdraw()
+        raiz.attributes("-topmost", True)
+        senha = simpledialog.askstring("Conciliação", rotulo, show="*", parent=raiz)
+        raiz.destroy()
+    except Exception:  # sem interface gráfica: volta para o getpass
+        return getpass.getpass(f"{rotulo} ")
+    if senha is None:
+        raise ErroConfig("senha não informada (janela cancelada)")
+    return senha
+
+
 def _preencher_senha(conexao):
     """Troca {senha} ou {senha:NOME} pela senha, sem nunca gravá-la em arquivo.
     Ordem: variável de ambiente CONCILIACAO_SENHA (ou CONCILIACAO_SENHA_NOME); senão pergunta
@@ -257,8 +278,8 @@ def _preencher_senha(conexao):
         nome = (m.group(1) or "").upper()
         if nome not in _SENHAS:
             var = "CONCILIACAO_SENHA" + (f"_{nome}" if nome else "")
-            _SENHAS[nome] = os.environ.get(var) or getpass.getpass(
-                f"Senha do banco{' ' + nome if nome else ''} (não aparece ao digitar): ")
+            _SENHAS[nome] = os.environ.get(var) or _pedir_senha(
+                f"Senha do banco{' ' + nome if nome else ''}:")
         return _SENHAS[nome]
 
     return re.sub(r"\{senha(?::([A-Za-z0-9_]+))?\}", trocar, conexao)
@@ -366,6 +387,26 @@ def _resolver(caminho, raiz):
     return p if p.is_absolute() else Path(raiz) / p
 
 
+def _limpar_caminho(t):
+    """Tira aspas, quebras de linha e espaços especiais que vêm junto quando se cola no Excel."""
+    t = _sem_aspas(t)
+    t = "".join(ch for ch in t if ord(ch) >= 32).replace(chr(160), " ").strip()
+    return _sem_aspas(t)
+
+
+def _validar_caminho(arq):
+    """Erro claro antes de o Windows reclamar: caractere proibido ou pasta inexistente."""
+    texto = str(arq)
+    corpo = texto[2:] if re.match(r"^[A-Za-z]:", texto) else texto
+    proibidos = [(i, ch) for i, ch in enumerate(corpo) if ch in '<>:"|?*']
+    if proibidos:
+        lista = ", ".join(f"'{ch}' na posição {i + (len(texto) - len(corpo)) + 1}" for i, ch in proibidos[:5])
+        raise ErroConfig(f"caminho com caractere que o Windows não aceita: {lista}. Para o arquivo de cada dia "
+                         "use {ddmmaaaa} ou {aaaammdd} no nome, não * nem ?")
+    if not arq.parent.exists():
+        raise ErroConfig(f"a pasta não existe ou não tenho acesso: {arq.parent}")
+
+
 def _sem_aspas(t):
     """Tira aspas em volta (ex.: caminho copiado com 'Copiar como caminho', string colada do Python)."""
     t = t.strip()
@@ -419,6 +460,8 @@ DICAS_ERRO = [
 
 
 def _explicar_erro(e):
+    if isinstance(e, ErroConfig):
+        return str(e)
     if isinstance(e, FileNotFoundError):
         return (f"arquivo não encontrado: {getattr(e, 'filename', '') or e}. Se o nome tem {{ddmmaaaa}} "
                 "ou {aaaammdd}, precisa existir o arquivo do dia")
@@ -442,7 +485,8 @@ def abrir_fonte(apelido, sistema, tipo, caminho, alvo, data_base, raiz, amostra=
 
 def _arquivo_mais_recente(modelo, raiz):
     """Para o descobrir: se o arquivo do dia não existe, usa o mais recente com o mesmo padrão."""
-    padrao = re.sub(r"\{(data_base|data_base_br|aaaammdd|ddmmaaaa)\}", "*", _sem_aspas(modelo))
+    padrao = re.sub(r"\{(data_base_br|data_base|aaaammdd|ddmmaaaa)\}", "*", _limpar_caminho(modelo),
+                    flags=re.IGNORECASE)
     p = _resolver(padrao, raiz)
     achados = sorted(p.parent.glob(p.name), key=lambda x: x.stat().st_mtime) if p.parent.exists() else []
     return str(achados[-1]) if achados else None
@@ -453,16 +497,21 @@ def ler_fonte(tipo, caminho, alvo, data_base, raiz, amostra=None, cache=None):
     if tipo == "odbc":
         caminho, alvo = _limpar_conexao(caminho), _limpar_sql(alvo)
     else:
-        caminho, alvo = _sem_aspas(caminho), _sem_aspas(alvo)
+        caminho, alvo = _limpar_caminho(caminho), _sem_aspas(alvo)
     caminho, alvo = _substituir(caminho, data_base), _substituir(alvo, data_base)
     chave = (tipo, caminho, alvo, amostra)
     if cache is not None and chave in cache:
         return cache[chave]
     if tipo == "excel":
-        df = pd.read_excel(_resolver(caminho, raiz), sheet_name=alvo if alvo else 0, nrows=amostra)
+        arq = _resolver(caminho, raiz)
+        _validar_caminho(arq)
+        with open(arq, "rb") as fh:  # idem: acento no caminho
+            df = pd.read_excel(fh, sheet_name=alvo if alvo else 0, nrows=amostra)
     elif tipo == "csv":
+        arq = _resolver(caminho, raiz)
+        _validar_caminho(arq)
         sep = (chr(9) if alvo.lower() == "tab" else alvo) if alvo else None
-        df = _ler_csv(_resolver(caminho, raiz), sep, amostra)
+        df = _ler_csv(arq, sep, amostra)
     elif tipo == "odbc":
         import pyodbc  # só precisa existir se alguma fonte for odbc
         con = pyodbc.connect(_preencher_senha(caminho))
@@ -512,8 +561,9 @@ def _ler_csv(arq, sep, amostra):
                 pular_real += 1
                 if l.strip():
                     vistos += 1
-        return pd.read_csv(arq, sep=sep_usado, encoding=enc, dtype=str, nrows=amostra,
-                           skiprows=pular_real, index_col=False)
+        # o Python abre o arquivo e entrega ao pandas: caminho com acento (ç, ã, á) funciona em qualquer versão
+        with open(arq, encoding=enc, newline="") as fh:
+            return pd.read_csv(fh, sep=sep_usado, dtype=str, nrows=amostra, skiprows=pular_real, index_col=False)
     raise ultimo_erro
 
 
@@ -1423,8 +1473,9 @@ def descobrir(config):
         apelido, sistema = _s(apelido), _s(sistema)
         rotulo = f"{apelido}[{sistema or '-'}]"
         caminho_usado = _s(caminho)
-        if _s(tipo).lower() in ("csv", "excel") and re.search(r"\{(aaaammdd|ddmmaaaa|data_base)", caminho_usado):
-            arq_dia = _resolver(_substituir(_sem_aspas(caminho_usado), db), raiz)
+        if _s(tipo).lower() in ("csv", "excel") and re.search(r"\{(aaaammdd|ddmmaaaa|data_base)", caminho_usado,
+                                                               flags=re.IGNORECASE):
+            arq_dia = _resolver(_substituir(_limpar_caminho(caminho_usado), db), raiz)
             if not arq_dia.exists():
                 recente = _arquivo_mais_recente(caminho_usado, raiz)
                 if recente:
@@ -1899,13 +1950,13 @@ def autoteste():
             ok_env = _preencher_senha("UID=u;PWD={senha:teste}") == "UID=u;PWD=x1"
             del os.environ["CONCILIACAO_SENHA_TESTE"]
             _SENHAS.clear()
-            chamadas, original = [], _gp.getpass
-            _gp.getpass = lambda prompt="": chamadas.append(prompt) or "y2"
+            chamadas, original = [], globals()["_pedir_senha"]
+            globals()["_pedir_senha"] = lambda rotulo="": chamadas.append(rotulo) or "y2"
             try:
                 a = _preencher_senha("PWD={senha}")
                 b = _preencher_senha("PWD={senha};X={senha}")
             finally:
-                _gp.getpass = original
+                globals()["_pedir_senha"] = original
         finally:
             _SENHAS.clear()
             if guardada is not None:
@@ -1990,6 +2041,30 @@ def autoteste():
         arq.write_text(nl.join(["CONTA;VALOR", "1.000.001;3,00"]) + nl, encoding="utf-16")
         df = ler_fonte("csv", str(arq), "", db, tmp4)
         v.check("T39 CSV em UTF-16", list(df.columns) == ["CONTA", "VALOR"] and df["VALOR"].iloc[0] == "3,00")
+        quebra = str(tmp4 / "utf16.csv") + chr(10) + chr(160)
+        v.check("T41 caminho com quebra de linha/espaço especial colado do Excel é limpo",
+                list(ler_fonte("csv", quebra, "", db, tmp4).columns) == ["CONTA", "VALOR"])
+        try:
+            ler_fonte("csv", str(tmp4 / "LANC_*.csv"), "", db, tmp4)
+            msg = ""
+        except ErroConfig as e:
+            msg = str(e)
+        v.check("T42 caractere proibido no caminho é apontado", "'*'" in msg and "ddmmaaaa" in msg)
+        try:
+            ler_fonte("csv", str(tmp4 / "nao_existe" / "x.csv"), "", db, tmp4)
+            msg = ""
+        except ErroConfig as e:
+            msg = str(e)
+        v.check("T43 pasta inexistente é apontada", "pasta não existe" in msg)
+        pasta_acento = tmp4 / "Conciliação ç ã á" / "Lançamentos"
+        pasta_acento.mkdir(parents=True)
+        (pasta_acento / "Lançamento_13112026.csv").write_text("CONTA;VALOR" + nl + "1.000.001;3,00" + nl,
+                                                              encoding="latin-1")
+        pd.DataFrame({"CONTA": ["1.000.001"]}).to_excel(pasta_acento / "Saldo ação.xlsx", index=False)
+        v.check("T44 caminho com acento (ç, ã, á) em CSV e Excel",
+                list(ler_fonte("csv", str(pasta_acento / "Lançamento_{ddmmaaaa}.csv"), "", db, tmp4).columns)
+                == ["CONTA", "VALOR"]
+                and list(ler_fonte("excel", str(pasta_acento / "Saldo ação.xlsx"), "", db, tmp4).columns) == ["CONTA"])
         v.check("T40 marcador de data em maiúsculas ({DDMMAAAA})",
                 _substituir("X_{DDMMAAAA}_{aaaammdd}.csv", db) == f"X_{db:%d%m%Y}_{db:%Y%m%d}.csv")
     finally:

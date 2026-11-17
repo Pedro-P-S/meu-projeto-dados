@@ -5,7 +5,7 @@
 
 ## 1. Visão Geral e Status Atual
 
-- **Versão:** 0.2.5 — `conciliacao.py` (arquivo único). Autoteste 42/42 OK em pandas 1.5, 2.0 e 3.1.
+- **Versão:** 0.2.6 — `conciliacao.py` (arquivo único). Autoteste 46/46 OK em pandas 1.5, 2.0 e 3.1.
 - **Objetivo:** bater **3 fontes** (saldo das contas, base operacional, lançamentos do dia) em **3 medidas** (Empréstimo, RAOC, saldo líquido = Empréstimo − RAOC) e dizer **qual operação abriu diferença, em qual medida, há quantos dias**.
 - **Prioridades do negócio:**
   1. **Estancar o sangramento:** achar a operação que abriu diferença hoje, antes de arrumar diferenças antigas.
@@ -32,7 +32,7 @@
 - **Médio prazo:** tirar o Access do meio, com SQL direto no Oracle via `odbc`.
 - **Ambiente:** Windows, Python, `pandas` (1.5+), `openpyxl`, `pyodbc` (só para `odbc`).
 - **Onde estão os dados:** saldo das contas, parcelas e posição estão no mesmo banco de dados (data warehouse), que recebe dados de vários sistemas. Os lançamentos do dia são um CSV gerado pelo sistema de crédito, um arquivo por dia.
-- **Senha:** nunca no config. Na conexão, escreva `PWD={senha}` (ou `{senha:NOME}` para mais de um banco). O programa lê a variável de ambiente `CONCILIACAO_SENHA` (ou `CONCILIACAO_SENHA_NOME`); se ela não existir, pergunta uma vez por execução, sem mostrar o que é digitado.
+- **Senha:** nunca no config. Na conexão, escreva `PWD={senha}` (ou `{senha:NOME}` para mais de um banco). O programa lê a variável de ambiente `CONCILIACAO_SENHA` (ou `CONCILIACAO_SENHA_NOME`); se ela não existir, pergunta uma vez por execução: no terminal sem mostrar o texto; no Spyder numa janela com ****, fora do histórico do console.
 - **`sistema` (FONTES/COLUNAS):** é o sistema de origem, dono do número da operação, não o banco de onde a tabela vem. Com um sistema só, deixe vazio em tudo. Com vários: filtre cada sistema no SQL, preencha `sistema` nas linhas de parcelas, posição e lançamentos daquele sistema, e só casam lançamento e operação do mesmo sistema. Lançamento sem `sistema`, com um só sistema na base, é atribuído a ele.
 
 ### Extensibilidade
