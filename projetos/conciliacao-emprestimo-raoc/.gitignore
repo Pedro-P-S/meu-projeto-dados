@@ -1,0 +1,14 @@
+# Nunca vai para o GitHub: dados, saídas e configuração com nomes reais
+config_local/
+dados/
+saidas/
+baseline/
+*.xlsx
+*.xlsm
+*.accdb
+*.mdb
+*.csv
+!config_modelo/*.csv
+resumo_verificacao.txt
+__pycache__/
+.venv/
