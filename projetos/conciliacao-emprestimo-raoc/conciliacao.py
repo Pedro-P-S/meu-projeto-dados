@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSAO = "0.2.3"
+VERSAO = "0.2.4"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 CONFIG_PADRAO = PASTA_SCRIPT / "config_local" / "config.xlsx"
 EPS = 1e-9
@@ -298,6 +298,11 @@ def ler_config(caminho):
         if faltam:
             raise ErroConfig(f"Aba {aba}: faltam as colunas {faltam}.")
         cfg[aba] = df[colunas].dropna(how="all").reset_index(drop=True)
+    # linha de FONTES sem caminho/conexão = fonte não usada (ex.: conciliacao_atual deixada em branco)
+    f = cfg["FONTES"]
+    vazia = (f["apelido"].map(_s) == "") | (f["caminho_ou_conexao"].map(_s) == "")
+    cfg["_puladas"] = [_s(a) or "(sem apelido)" for a in f.loc[vazia, "apelido"]]
+    cfg["FONTES"] = f[~vazia].reset_index(drop=True)
     P = dict(PARAM_PADRAO)
     for nome, valor in cfg["PARAMETROS"][["nome", "valor"]].itertuples(index=False):
         if _s(nome) and _s(valor) != "":
@@ -361,8 +366,84 @@ def _resolver(caminho, raiz):
     return p if p.is_absolute() else Path(raiz) / p
 
 
+def _sem_aspas(t):
+    """Tira aspas em volta (ex.: caminho copiado com 'Copiar como caminho', string colada do Python)."""
+    t = t.strip()
+    m = re.match(r"^[rRuU]?(['\"])(.*)\1$", t, re.S)
+    return m.group(2).strip() if m else t
+
+
+def _limpar_conexao(t):
+    """Aceita a string como está no código: pyodbc.connect('...'), r'...', "..."."""
+    t = t.strip()
+    m = re.match(r"^(?:pyodbc\s*\.\s*)?connect\s*\((.*)\)\s*;?$", t, re.S)
+    if m:
+        t = m.group(1)
+    return _sem_aspas(t)
+
+
+def _limpar_sql(t):
+    return t.strip().rstrip(";").strip()
+
+
+DICAS_ERRO = [
+    (("IM002", "Data source name not found", "nome da fonte de dados"),
+     "driver ou DSN da conexão não encontrado: escreva o DRIVER={...} ou DSN= igual ao do seu pyodbc.connect"),
+    (("ORA-01017", "28000", "invalid username", "inválido"),
+     "usuário ou senha inválidos: confira o UID= e digite a senha de novo (ou a variável CONCILIACAO_SENHA)"),
+    (("ORA-00942", "table or view does not exist", "não existe"),
+     "tabela não existe ou sem acesso: use o nome completo OWNER.TABELA"),
+    (("ORA-00911", "invalid character", "caractere inválido"),
+     "caractere inválido no SQL: confira aspas e símbolos colados de outro lugar"),
+    (("ORA-00933", "ORA-00936", "ORA-00904", "ORA-00907"),
+     "SQL mal escrito ou coluna inexistente: confira o SQL da aba FONTES"),
+    (("ORA-12154", "ORA-12514", "ORA-12541", "ORA-12170", "TNS"),
+     "banco não encontrado (serviço/TNS) ou fora do ar: confira o DBQ=/servidor da conexão"),
+    (("08001", "Unable to connect", "Não foi possível"),
+     "não conectou ao banco: confira a conexão e a rede/VPN"),
+    (("StdinNotImplemented", "GetPassWarning", "getpass"),
+     "este console não deixa digitar a senha: crie a variável CONCILIACAO_SENHA ou rode pelo Prompt/cmd"),
+    (("No module named 'pyodbc'",), "pyodbc não instalado: pip install pyodbc"),
+    (("Worksheet named", "No sheet named"), "aba do Excel não encontrada: confira aba_ou_consulta"),
+]
+
+
+def _explicar_erro(e):
+    if isinstance(e, FileNotFoundError):
+        return (f"arquivo não encontrado: {getattr(e, 'filename', '') or e}. Se o nome tem {{ddmmaaaa}} "
+                "ou {aaaammdd}, precisa existir o arquivo do dia")
+    msg = f"{type(e).__name__} {e}"
+    for chaves, dica in DICAS_ERRO:
+        if any(c.lower() in msg.lower() for c in chaves):
+            return dica
+    return "veja a mensagem do erro"
+
+
+def abrir_fonte(apelido, sistema, tipo, caminho, alvo, data_base, raiz, amostra=None, cache=None):
+    """ler_fonte com erro explicado em português (ErroConfig)."""
+    try:
+        return ler_fonte(tipo, caminho, alvo, data_base, raiz, amostra=amostra, cache=cache)
+    except ErroConfig:
+        raise
+    except Exception as e:
+        raise ErroConfig(f"{apelido}[{sistema or '-'}] não abriu — {_explicar_erro(e)}. "
+                         f"({type(e).__name__}: {str(e)[:300]})")
+
+
+def _arquivo_mais_recente(modelo, raiz):
+    """Para o descobrir: se o arquivo do dia não existe, usa o mais recente com o mesmo padrão."""
+    padrao = re.sub(r"\{(data_base|data_base_br|aaaammdd|ddmmaaaa)\}", "*", _sem_aspas(modelo))
+    p = _resolver(padrao, raiz)
+    achados = sorted(p.parent.glob(p.name), key=lambda x: x.stat().st_mtime) if p.parent.exists() else []
+    return str(achados[-1]) if achados else None
+
+
 def ler_fonte(tipo, caminho, alvo, data_base, raiz, amostra=None, cache=None):
     tipo = tipo.lower()
+    if tipo == "odbc":
+        caminho, alvo = _limpar_conexao(caminho), _limpar_sql(alvo)
+    else:
+        caminho, alvo = _sem_aspas(caminho), _sem_aspas(alvo)
     caminho, alvo = _substituir(caminho, data_base), _substituir(alvo, data_base)
     chave = (tipo, caminho, alvo, amostra)
     if cache is not None and chave in cache:
@@ -485,7 +566,7 @@ def carregar_fontes(cfg, P, data_base, raiz, v, cache=None, apelidos=None):
             raise ErroConfig(f"FONTES: apelido '{apelido}' desconhecido. Use {list(CANONICO)}.")
         if apelidos is not None and apelido not in apelidos:
             continue
-        bruto = ler_fonte(_s(tipo), _s(caminho), _s(alvo), data_base, raiz, cache=cache)
+        bruto = abrir_fonte(apelido, sistema, _s(tipo), _s(caminho), _s(alvo), data_base, raiz, cache=cache)
         df = canonizar(bruto, apelido, sistema, mapa_colunas(cfg, apelido, sistema), data_base, v)
         partes.setdefault(apelido, []).append(df)
     dados = {}
@@ -1053,6 +1134,8 @@ def executar_conciliacao(config, data_base=None, v=None, anterior=None, cache=No
     pasta_hist = _resolver(P["pasta_historico"], raiz)
     cache = {} if cache is None else cache
     v.info(f"Data-base: {db:%Y-%m-%d}")
+    if cfg["_puladas"]:
+        v.info(f"Fontes sem caminho, ignoradas: {', '.join(cfg['_puladas'])}")
     dados, ops, res, faltam = _calcular_dia(cfg, P, contas, indexadores, faixas, db, raiz, v, cache)
     validacao = validar_conciliacao_atual(dados["conciliacao_atual"], res, contas, P, v)
 
@@ -1288,15 +1371,29 @@ def descobrir(config):
     cfg, P = ler_config(config)
     db = _data_param(P["data_base"] or datetime.now().strftime("%Y-%m-%d"), "data_base")
     txt = [f"Python {sys.version.split()[0]} | pandas {pd.__version__} | drivers ODBC: {drivers}", ""]
+    if cfg["_puladas"]:
+        txt += [f"Fontes sem caminho, ignoradas: {', '.join(cfg['_puladas'])}", ""]
     col_rows, sug_rows = [], []
     for apelido, sistema, tipo, caminho, alvo in cfg["FONTES"].itertuples(index=False):
         apelido, sistema = _s(apelido), _s(sistema)
         rotulo = f"{apelido}[{sistema or '-'}]"
+        caminho_usado = _s(caminho)
+        if _s(tipo).lower() in ("csv", "excel") and re.search(r"\{(aaaammdd|ddmmaaaa|data_base)", caminho_usado):
+            arq_dia = _resolver(_substituir(_sem_aspas(caminho_usado), db), raiz)
+            if not arq_dia.exists():
+                recente = _arquivo_mais_recente(caminho_usado, raiz)
+                if recente:
+                    txt.append(f"[{rotulo}] arquivo do dia {db:%d/%m/%Y} não existe; usei o mais recente: "
+                               f"{Path(recente).name}")
+                    caminho_usado = recente
         try:
-            amostra = ler_fonte(_s(tipo), _s(caminho), _s(alvo), db, raiz, amostra=5000)
-        except Exception as e:  # mostra o erro e segue para a próxima fonte
+            amostra = ler_fonte(_s(tipo), caminho_usado, _s(alvo), db, raiz, amostra=5000)
+        except Exception as e:  # mostra o erro explicado e segue para a próxima fonte
+            dica = _explicar_erro(e)
             v.check(f"{rotulo} fonte abre", False)
-            txt.append(f"[{rotulo}] ERRO ao abrir: {type(e).__name__}: {e}\n")
+            v.info(f"    O que fazer: {dica}")
+            txt.append(f"[{rotulo}] ERRO ao abrir: {type(e).__name__}: {str(e)[:300]}\n"
+                       f"    O que fazer: {dica}\n")
             continue
         v.check(f"{rotulo} fonte abre", True)
         escolhido, alternativas, tipos = sugerir_mapa(amostra, apelido)
@@ -1378,7 +1475,7 @@ def hipoteses(config, data_base=None, eco=True):
         apelido, sistema = _s(apelido), _s(sistema)
         if apelido not in ("posicao", "parcelas"):
             continue
-        bruto = ler_fonte(_s(tipo), _s(caminho), _s(alvo), db, raiz, cache=cache)
+        bruto = abrir_fonte(apelido, sistema, _s(tipo), _s(caminho), _s(alvo), db, raiz, cache=cache)
         amostra = bruto.head(5000)
         nums = [c for c in bruto.columns if _tipo_detectado(amostra[c]) == "num"]
         atual = mapa_colunas(cfg, apelido, sistema)
@@ -1790,6 +1887,40 @@ def autoteste():
         v.check("T33 lançamentos sem 'sistema' casam com a base de um sistema só",
                 not ((it["onde"] == "BASE_X_LANC") & it["operacao"].isin(["A1", "A2"])).any()
                 and "CHECK lançamentos: sistema informado (há mais de um sistema na base): OK" in r6["v"].linhas)
+
+        # Conexão e SQL colados do Python são limpos
+        v.check("T34 conexão com aspas/pyodbc.connect e SQL com ';' são limpos",
+                _limpar_conexao('"DSN=X;UID=u;PWD={senha}"') == "DSN=X;UID=u;PWD={senha}"
+                and _limpar_conexao("pyodbc.connect('DSN=X')") == "DSN=X"
+                and _limpar_conexao("r'DRIVER={Oracle};DBQ=a'") == "DRIVER={Oracle};DBQ=a"
+                and _limpar_sql("SELECT * FROM T;  ") == "SELECT * FROM T")
+        v.check("T35 erros explicados em português",
+                "senha" in _explicar_erro(Exception("[28000] ORA-01017: invalid username/password"))
+                and "arquivo não encontrado" in _explicar_erro(FileNotFoundError(2, "x", "a.csv"))
+                and "OWNER.TABELA" in _explicar_erro(Exception("ORA-00942: table or view does not exist")))
+
+        # descobrir: linha de fonte em branco é ignorada, caminho com aspas funciona,
+        # arquivo do dia que não existe usa o mais recente
+        tmp6, config6 = nova_pasta()
+        abas = pd.read_excel(config6, sheet_name=None, dtype=object)
+        f = abas["FONTES"]
+        f.loc[f["apelido"] == "conciliacao_atual", "caminho_ou_conexao"] = np.nan
+        alvo_a = (f["apelido"] == "parcelas") & (f["sistema"] == "A")
+        f.loc[alvo_a, "caminho_ou_conexao"] = '"' + str(tmp6 / "dados" / "parcelas_a.xlsx") + '"'
+        abas["FONTES"] = f
+        p = abas["PARAMETROS"]
+        p.loc[p["nome"] == "data_base", "valor"] = "2026-11-16"  # sem arquivo de lançamentos deste dia
+        abas["PARAMETROS"] = p
+        with pd.ExcelWriter(config6, engine="openpyxl") as w:
+            for nome, df in abas.items():
+                df.to_excel(w, sheet_name=nome, index=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            v6 = descobrir(config6)
+        cfg6, _ = ler_config(config6)
+        v.check("T36 fonte sem caminho é ignorada e não falha",
+                cfg6["_puladas"] == ["conciliacao_atual"] and not any("conciliacao_atual" in l for l in v6.linhas))
+        v.check("T37 caminho com aspas e arquivo do dia ausente não falham no descobrir",
+                not [l for l in v6.linhas if "fonte abre: FALHOU" in l])
 
         # CSV com outro separador é detectado sozinho
         tmp4 = nova_pasta()[0]
