@@ -5,7 +5,7 @@
 
 ## 1. Visão Geral e Status Atual
 
-- **Versão:** 0.3.0 — `conciliacao.py` (arquivo único). Autoteste 49/49 OK em pandas 1.5, 2.0 e 3.1.
+- **Versão:** 0.3.1 — `conciliacao.py` (arquivo único). Autoteste 49/49 OK em pandas 1.5, 2.0 e 3.1.
 - **Objetivo:** bater **3 fontes** (saldo das contas, base operacional, lançamentos do dia) em **3 medidas** (Empréstimo, RAOC, saldo líquido = Empréstimo − RAOC) e dizer **qual operação abriu diferença, em qual medida, há quantos dias**.
 - **Prioridades do negócio:**
   1. **Estancar o sangramento:** achar a operação que abriu diferença hoje, antes de arrumar diferenças antigas.

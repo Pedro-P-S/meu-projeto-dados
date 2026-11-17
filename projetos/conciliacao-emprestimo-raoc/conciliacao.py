@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSAO = "0.3.0"
+VERSAO = "0.3.1"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 CONFIG_PADRAO = PASTA_SCRIPT / "config_local" / "config.xlsx"
 EPS = 1e-9
