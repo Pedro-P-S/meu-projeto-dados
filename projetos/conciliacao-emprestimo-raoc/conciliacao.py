@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSAO = "0.2.0"
+VERSAO = "0.2.1"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 CONFIG_PADRAO = PASTA_SCRIPT / "config_local" / "config.xlsx"
 EPS = 1e-9
@@ -1716,17 +1716,51 @@ def autoteste():
 
 
 # ---------------------------------------------------------------------------
+COMANDOS = ["autoteste", "modelo", "descobrir", "hipoteses", "conciliar", "baseline"]
+MENU = [
+    ("autoteste", "testa o programa com dados inventados", False),
+    ("modelo", "cria config_local/config.xlsx e dados de exemplo", False),
+    ("descobrir", "lê as fontes e sugere as colunas", False),
+    ("hipoteses", "testa pelos valores qual coluna fecha melhor", True),
+    ("conciliar", "concilia um dia e gera o Excel", True),
+    ("baseline", "guarda as diferenças de um dia como 'Histórico'", True),
+]
+
+
+def _menu():
+    print(f"\nConciliação v{VERSAO} — escolha o que rodar:")
+    for i, (cmd, desc, _) in enumerate(MENU, 1):
+        print(f"  {i}. {cmd:<11} {desc}")
+    print("  0. sair")
+    escolha = input("Número: ").strip()
+    if not escolha.isdigit() or not 1 <= int(escolha) <= len(MENU):
+        print("Saindo.")
+        return None, None, None
+    cmd, _, pede_data = MENU[int(escolha) - 1]
+    data = anterior = None
+    if pede_data:
+        obrig = cmd == "baseline"
+        data = input(f"Data AAAA-MM-DD ({'obrigatória' if obrig else 'Enter = data do config'}): ").strip() or None
+        if cmd == "conciliar":
+            anterior = input("Dia anterior AAAA-MM-DD (Enter = dia útil anterior): ").strip() or None
+    return cmd, data, anterior
+
+
 def main(argv=None):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except AttributeError:
+    except Exception:  # console do Spyder/IPython não tem reconfigure
         pass
     ap = argparse.ArgumentParser(description="Conciliação Empréstimo x RAOC x Saldo")
-    ap.add_argument("comando", choices=["autoteste", "modelo", "descobrir", "hipoteses", "conciliar", "baseline"])
+    ap.add_argument("comando", nargs="?", choices=COMANDOS)
     ap.add_argument("data_base", nargs="?", help="AAAA-MM-DD")
     ap.add_argument("--anterior", help="dia anterior (AAAA-MM-DD), para feriado")
     ap.add_argument("--config", default=str(CONFIG_PADRAO))
     a = ap.parse_args(argv)
+    if a.comando is None:  # rodado sem argumento (ex.: botão Run do Spyder): mostra um menu
+        a.comando, a.data_base, a.anterior = _menu()
+        if a.comando is None:
+            return 0
     resumo = PASTA_SCRIPT / "resumo_verificacao.txt"
     v = Verificacao()
     try:

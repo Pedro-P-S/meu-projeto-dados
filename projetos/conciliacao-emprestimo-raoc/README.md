@@ -31,10 +31,12 @@ As linhas de um grupo somam a diferença do grupo, que aparece na aba `RESUMO`. 
 
 1. Crie uma pasta, por exemplo `C:\conciliacao`.
 2. No GitHub, abra `conciliacao.py`, clique em **Raw**, `Ctrl+A`, `Ctrl+C`. Cole no Bloco de Notas e salve como `conciliacao.py` na pasta, em **UTF-8**.
-3. Teste:
-   ```
-   python conciliacao.py autoteste
-   ```
+3. Teste. Escolha um dos jeitos:
+   - **Spyder:** abra o `conciliacao.py` e aperte **Run** (F5). Aparece um menu; digite `1` (autoteste).
+   - **Console do Spyder:** `runfile('conciliacao.py', args='autoteste')`
+   - **Prompt do Anaconda ou cmd**, na pasta: `python conciliacao.py autoteste`
+
+   (Digitar `python conciliacao.py ...` dentro do console do Spyder dá *syntax error*; esse comando é do terminal.)
    O `resumo_verificacao.txt` tem que terminar com `RESULTADO: TUDO OK`.
 4. Rode o exemplo com dados inventados:
    ```
