@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSAO = "0.2.4"
+VERSAO = "0.2.5"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 CONFIG_PADRAO = PASTA_SCRIPT / "config_local" / "config.xlsx"
 EPS = 1e-9
@@ -265,10 +265,10 @@ def _preencher_senha(conexao):
 
 
 def _substituir(texto, db):
-    return (texto.replace("{data_base}", db.strftime("%Y-%m-%d"))
-                 .replace("{data_base_br}", db.strftime("%d/%m/%Y"))
-                 .replace("{aaaammdd}", db.strftime("%Y%m%d"))
-                 .replace("{ddmmaaaa}", db.strftime("%d%m%Y")))
+    valores = {"data_base": db.strftime("%Y-%m-%d"), "data_base_br": db.strftime("%d/%m/%Y"),
+               "aaaammdd": db.strftime("%Y%m%d"), "ddmmaaaa": db.strftime("%d%m%Y")}
+    return re.sub(r"\{(data_base_br|data_base|aaaammdd|ddmmaaaa)\}",
+                  lambda m: valores[m.group(1).lower()], texto, flags=re.IGNORECASE)
 
 
 def _partes_expr(expr):
@@ -404,6 +404,16 @@ DICAS_ERRO = [
     (("StdinNotImplemented", "GetPassWarning", "getpass"),
      "este console não deixa digitar a senha: crie a variável CONCILIACAO_SENHA ou rode pelo Prompt/cmd"),
     (("No module named 'pyodbc'",), "pyodbc não instalado: pip install pyodbc"),
+    (("ParserError", "Error tokenizing", "Expected"),
+     "o CSV tem linhas com número de colunas diferente: abra no Bloco de Notas e me diga se há título antes "
+     "do cabeçalho, totais no fim, ou ';' dentro dos valores. Se o separador for outro, escreva-o em aba_ou_consulta"),
+    (("EmptyDataError", "No columns to parse"), "arquivo vazio"),
+    (("PermissionError", "Permission denied", "being used by another process"),
+     "arquivo aberto em outro programa (feche o Excel) ou sem permissão na pasta"),
+    (("IsADirectoryError", "Is a directory"), "o caminho é uma pasta: inclua o nome do arquivo no final"),
+    (("UnicodeDecodeError", "codec can't decode"), "codificação do arquivo desconhecida: me diga qual programa gera o CSV"),
+    (("OSError", "Invalid argument", "WinError 123"),
+     "caminho inválido: confira barras, aspas e caracteres especiais no caminho"),
     (("Worksheet named", "No sheet named"), "aba do Excel não encontrada: confira aba_ou_consulta"),
 ]
 
@@ -451,15 +461,8 @@ def ler_fonte(tipo, caminho, alvo, data_base, raiz, amostra=None, cache=None):
     if tipo == "excel":
         df = pd.read_excel(_resolver(caminho, raiz), sheet_name=alvo if alvo else 0, nrows=amostra)
     elif tipo == "csv":
-        arq = _resolver(caminho, raiz)
-        df = None
-        for enc in ("utf-8-sig", "latin-1"):
-            try:
-                sep = (chr(9) if alvo.lower() == "tab" else alvo) if alvo else _separador(arq, enc)
-                df = pd.read_csv(arq, sep=sep, encoding=enc, dtype=str, nrows=amostra)
-                break
-            except UnicodeDecodeError:
-                continue
+        sep = (chr(9) if alvo.lower() == "tab" else alvo) if alvo else None
+        df = _ler_csv(_resolver(caminho, raiz), sep, amostra)
     elif tipo == "odbc":
         import pyodbc  # só precisa existir se alguma fonte for odbc
         con = pyodbc.connect(_preencher_senha(caminho))
@@ -479,13 +482,55 @@ def ler_fonte(tipo, caminho, alvo, data_base, raiz, amostra=None, cache=None):
     return df
 
 
-def _separador(arq, encoding):
-    """Separador do CSV pela 1ª linha: ; , tab ou | (o que aparecer mais)."""
-    with open(arq, encoding=encoding) as f:
-        primeira = f.readline()
-    contagem = {sep: primeira.count(sep) for sep in (";", ",", chr(9), "|")}
-    melhor = max(contagem, key=contagem.get)
-    return melhor if contagem[melhor] > 0 else ";"
+def _ler_csv(arq, sep, amostra):
+    """CSV tolerante: detecta codificação (inclusive UTF-16), separador e linhas de título antes do cabeçalho."""
+    with open(arq, "rb") as f:
+        inicio = f.read(4)
+    codificacoes = ["utf-16"] if inicio[:2] in (b"\xff\xfe", b"\xfe\xff") else ["utf-8-sig", "latin-1"]
+    ultimo_erro = None
+    for enc in codificacoes:
+        try:
+            with open(arq, encoding=enc) as f:
+                linhas = [l for l in (f.readline() for _ in range(200)) if l.strip()]
+        except UnicodeDecodeError as e:
+            ultimo_erro = e
+            continue
+        if not linhas:
+            return pd.DataFrame()
+        sep_usado = sep or _separador(linhas)
+        contagens = [l.count(sep_usado) for l in linhas]
+        moda = pd.Series([c for c in contagens if c > 0] or [0]).mode().max()
+        # cabeçalho = 1ª linha com pelo menos metade dos separadores das linhas de dados
+        pular = next((i for i, c in enumerate(contagens) if c > 0 and c >= max(1, moda // 2)), 0)
+        # 'pular' conta linhas não vazias; converte para linhas do arquivo (com as vazias)
+        pular_real, vistos = 0, 0
+        with open(arq, encoding=enc) as f:
+            while vistos < pular:
+                l = f.readline()
+                if not l:
+                    break
+                pular_real += 1
+                if l.strip():
+                    vistos += 1
+        return pd.read_csv(arq, sep=sep_usado, encoding=enc, dtype=str, nrows=amostra,
+                           skiprows=pular_real, index_col=False)
+    raise ultimo_erro
+
+
+def _separador(linhas):
+    """Separador mais frequente e regular nas primeiras linhas: ; , tab ou |."""
+    melhor, nota_melhor = ";", (0, 0)
+    for sep in (";", ",", chr(9), "|"):
+        contagens = [l.count(sep) for l in linhas]
+        positivas = [c for c in contagens if c > 0]
+        if not positivas:
+            continue
+        moda = pd.Series(positivas).mode().max()
+        # colunas × linhas regulares: separador de verdade divide muitas colunas em muitas linhas
+        nota = (moda * sum(1 for c in contagens if c == moda), moda)
+        if nota > nota_melhor:
+            melhor, nota_melhor = sep, nota
+    return melhor
 
 
 def _vazio(canon, n):
@@ -1391,6 +1436,7 @@ def descobrir(config):
         except Exception as e:  # mostra o erro explicado e segue para a próxima fonte
             dica = _explicar_erro(e)
             v.check(f"{rotulo} fonte abre", False)
+            v.info(f"    Erro: {type(e).__name__}: {str(e)[:150]}")
             v.info(f"    O que fazer: {dica}")
             txt.append(f"[{rotulo}] ERRO ao abrir: {type(e).__name__}: {str(e)[:300]}\n"
                        f"    O que fazer: {dica}\n")
@@ -1931,6 +1977,21 @@ def autoteste():
             df = ler_fonte("csv", str(arq), "", db, tmp4)
             v.check(f"T30 CSV com separador {'tab' if sep == chr(9) else sep} detectado",
                     list(df.columns) == ["CONTA", "VALOR"] and df["VALOR"].iloc[0] == "3,50")
+        nl = chr(10)
+        arq = tmp4 / "com_titulo.csv"
+        arq.write_text(nl.join(["RELATORIO DE LANCAMENTOS", "Gerado em 13/11/2026", "",
+                                "CONTA;OPERACAO;VALOR", "1.000.001;A1;3,00;", "1.000.099;A2;5,00;",
+                                "TOTAL;;8,00"]) + nl, encoding="latin-1")
+        df = ler_fonte("csv", str(arq), "", db, tmp4)
+        v.check("T38 CSV com título antes do cabeçalho e ';' no fim das linhas",
+                list(df.columns) == ["CONTA", "OPERACAO", "VALOR"] and list(df["OPERACAO"].iloc[:2]) == ["A1", "A2"]
+                and df["VALOR"].iloc[1] == "5,00")
+        arq = tmp4 / "utf16.csv"
+        arq.write_text(nl.join(["CONTA;VALOR", "1.000.001;3,00"]) + nl, encoding="utf-16")
+        df = ler_fonte("csv", str(arq), "", db, tmp4)
+        v.check("T39 CSV em UTF-16", list(df.columns) == ["CONTA", "VALOR"] and df["VALOR"].iloc[0] == "3,00")
+        v.check("T40 marcador de data em maiúsculas ({DDMMAAAA})",
+                _substituir("X_{DDMMAAAA}_{aaaammdd}.csv", db) == f"X_{db:%d%m%Y}_{db:%Y%m%d}.csv")
     finally:
         for p in pastas:
             shutil.rmtree(p, ignore_errors=True)
