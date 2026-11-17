@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSAO = "0.2.1"
+VERSAO = "0.2.2"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 CONFIG_PADRAO = PASTA_SCRIPT / "config_local" / "config.xlsx"
 EPS = 1e-9
@@ -353,7 +353,8 @@ def ler_fonte(tipo, caminho, alvo, data_base, raiz, amostra=None, cache=None):
         df = None
         for enc in ("utf-8-sig", "latin-1"):
             try:
-                df = pd.read_csv(arq, sep=";", encoding=enc, dtype=str, nrows=amostra)
+                sep = (chr(9) if alvo.lower() == "tab" else alvo) if alvo else _separador(arq, enc)
+                df = pd.read_csv(arq, sep=sep, encoding=enc, dtype=str, nrows=amostra)
                 break
             except UnicodeDecodeError:
                 continue
@@ -374,6 +375,15 @@ def ler_fonte(tipo, caminho, alvo, data_base, raiz, amostra=None, cache=None):
     if cache is not None:
         cache[chave] = df
     return df
+
+
+def _separador(arq, encoding):
+    """Separador do CSV pela 1ª linha: ; , tab ou | (o que aparecer mais)."""
+    with open(arq, encoding=encoding) as f:
+        primeira = f.readline()
+    contagem = {sep: primeira.count(sep) for sep in (";", ",", chr(9), "|")}
+    melhor = max(contagem, key=contagem.get)
+    return melhor if contagem[melhor] > 0 else ";"
 
 
 def _vazio(canon, n):
@@ -1709,6 +1719,15 @@ def autoteste():
                 melhores.get("parametro.saldo_inclui_multa_mora") == ["sim"])
         v.check("T29 hipóteses: código de situação que significa congelada",
                 melhores.get("parametro.valores_congelada") == ["S"])
+        # CSV com outro separador é detectado sozinho
+        tmp4 = nova_pasta()[0]
+        for sep in (",", chr(9), "|"):
+            arq = tmp4 / f"sep_{ord(sep)}.csv"
+            arq.write_text(sep.join(["CONTA", "VALOR"]) + chr(10) + sep.join(["1.000.001", '"3,50"']) + chr(10),
+                           encoding="utf-8")
+            df = ler_fonte("csv", str(arq), "", db, tmp4)
+            v.check(f"T30 CSV com separador {'tab' if sep == chr(9) else sep} detectado",
+                    list(df.columns) == ["CONTA", "VALOR"] and df["VALOR"].iloc[0] == "3,50")
     finally:
         for p in pastas:
             shutil.rmtree(p, ignore_errors=True)

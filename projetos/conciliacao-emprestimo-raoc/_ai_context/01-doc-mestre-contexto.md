@@ -5,7 +5,7 @@
 
 ## 1. Visão Geral e Status Atual
 
-- **Versão:** 0.2.0 — `conciliacao.py` (arquivo único). Autoteste 29/29 OK em pandas 1.5, 2.0 e 3.1.
+- **Versão:** 0.2.2 — `conciliacao.py` (arquivo único). Autoteste 32/32 OK em pandas 1.5, 2.0 e 3.1.
 - **Objetivo:** bater **3 fontes** (saldo das contas, base operacional, lançamentos do dia) em **3 medidas** (Empréstimo, RAOC, saldo líquido = Empréstimo − RAOC) e dizer **qual operação abriu diferença, em qual medida, há quantos dias**.
 - **Prioridades do negócio:**
   1. **Estancar o sangramento:** achar a operação que abriu diferença hoje, antes de arrumar diferenças antigas.
@@ -27,7 +27,7 @@
 | `lancamentos` | Lançamentos do dia que a base operacional mandou para a contabilidade (CSV) | 1 linha por lançamento |
 | `conciliacao_atual` | Diferença da conciliação que já existe (validação) | 1 linha por conta |
 
-- **Tipos de leitura:** `excel`, `csv` (separador `;`) e `odbc` (Access ou Oracle, SQL na aba `FONTES`).
+- **Tipos de leitura:** `excel`, `csv` (separador detectado sozinho: `;` `,` tab ou `|`; ou informe em `aba_ou_consulta`) e `odbc` (Access ou Oracle, SQL na aba `FONTES`).
 - **Marcadores de data** em caminho e SQL: `{data_base}` (AAAA-MM-DD), `{data_base_br}` (DD/MM/AAAA), `{aaaammdd}`, `{ddmmaaaa}`. Exemplo: um CSV de lançamentos por dia.
 - **Médio prazo:** tirar o Access do meio, com SQL direto no Oracle via `odbc`.
 - **Ambiente:** Windows, Python, `pandas` (1.5+), `openpyxl`, `pyodbc` (só para `odbc`).
